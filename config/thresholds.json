@@ -1,0 +1,27 @@
+{
+  "_comment": "Пороги тригера 'важкої ночі' та розклад. Правиться без розробника, бот перечитує файл при кожному запуску (передбачте sudo systemctl restart після зміни). Значення майже напевно доведеться підкрутити після місяця роботи (ТЗ п.3).",
+
+  "night_window_start": "22:00",
+  "night_window_end": "07:00",
+
+  "hard_window_start": "01:00",
+  "hard_window_end": "05:00",
+  "hard_window_min_duration_minutes": 60,
+
+  "min_alerts_count": 2,
+  "min_total_duration_minutes": 120,
+  "min_single_alert_minutes": 120,
+
+  "ballistic_threshold_multiplier": 0.5,
+  "ballistic_threat_types": ["ballistic"],
+
+  "threat_type_keywords": {
+    "ballistic": ["ballistic", "балісти", "iskander", "iskander-m", "kinzhal", "кинджал"],
+    "aviation": ["aviation", "авіац", "kab", "каб"],
+    "uav": ["uav", "shahed", "шахед", "бпла", "дрон", "drone"]
+  },
+
+  "preview_time": "07:01",
+  "autopublish_time": "08:00",
+  "alerts_poll_interval_seconds": 90
+}

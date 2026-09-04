@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Install package (editable, for src/ imports)
+        run: pip install -e .
+
+      - name: ruff check
+        run: ruff check .
+
+      - name: ruff format --check
+        run: ruff format --check .
+
+      - name: pytest
+        run: pytest -v
+
+      - name: validate config JSON
+        run: python -c "import json; json.load(open('config/texts.json')); json.load(open('config/thresholds.json'))"
+
+      - name: bash syntax check (deploy/install.sh)
+        run: bash -n deploy/install.sh
+
+      - name: shellcheck (deploy/install.sh)
+        run: shellcheck deploy/install.sh

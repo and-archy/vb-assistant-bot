@@ -1,0 +1,16 @@
+[Unit]
+Description=VB Assistant Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vbassistant
+WorkingDirectory=/opt/vb-assistant-bot
+EnvironmentFile=/etc/vb-assistant-bot/env
+ExecStart=/opt/vb-assistant-bot/.venv/bin/python -m vb_assistant_bot
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
