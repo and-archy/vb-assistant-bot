@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
@@ -12,7 +13,7 @@ from vb_assistant_bot.timeutil import parse_api_datetime
 class AlertWindow:
     started_at: datetime
     finished_at: datetime
-    threat_type: str | None
+    threat_types: tuple[str, ...]
     ongoing: bool
     crosses_hard_window: bool
 
@@ -38,21 +39,6 @@ class NightStats:
 
 def _localize(d: date, t: time, tz: ZoneInfo) -> datetime:
     return datetime.combine(d, t, tzinfo=tz)
-
-
-def match_threat_type(
-    raw_alert_type: str | None, keywords: dict[str, tuple[str, ...]]
-) -> str | None:
-    """Найкраще з можливого зіставлення (ТЗ п.2: 'якщо джерело віддає') —
-    жодне з двох офіційних API не гарантує розбивку БпЛА/балістика/авіація,
-    тож шукаємо за ключовими словами в тому, що фактично прийшло."""
-    if not raw_alert_type:
-        return None
-    lowered = raw_alert_type.lower()
-    for threat_type, words in keywords.items():
-        if any(word.lower() in lowered for word in words):
-            return threat_type
-    return None
 
 
 def compute_night_stats(
@@ -102,7 +88,7 @@ def compute_night_stats(
         alert = AlertWindow(
             started_at=clipped_start,
             finished_at=clipped_end,
-            threat_type=row["threat_type"],
+            threat_types=tuple(json.loads(row["threat_types"] or "[]")),
             ongoing=ongoing,
             crosses_hard_window=clipped_start < hard_end and clipped_end > hard_start,
         )
@@ -111,7 +97,7 @@ def compute_night_stats(
         if longest is None or alert.duration > longest.duration:
             longest = alert
 
-        if alert.threat_type in thresholds.ballistic_threat_types:
+        if any(t in thresholds.ballistic_threat_types for t in alert.threat_types):
             has_ballistic = True
 
     return NightStats(

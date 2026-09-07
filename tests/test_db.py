@@ -1,3 +1,5 @@
+import json
+
 from vb_assistant_bot import db
 
 
@@ -7,7 +9,7 @@ def test_upsert_alert_inserts_and_updates(conn):
         external_id="ext-1",
         location_uid="31",
         raw_alert_type="air_raid",
-        threat_type=None,
+        threat_types=[],
         started_at="2026-09-03T20:00:00+00:00",
         finished_at=None,
         updated_at="2026-09-03T20:00:00+00:00",
@@ -23,7 +25,7 @@ def test_upsert_alert_inserts_and_updates(conn):
         external_id="ext-1",
         location_uid="31",
         raw_alert_type="air_raid",
-        threat_type="uav",
+        threat_types=["drones"],
         started_at="2026-09-03T20:00:00+00:00",
         finished_at="2026-09-03T21:00:00+00:00",
         updated_at="2026-09-03T21:00:00+00:00",
@@ -33,7 +35,7 @@ def test_upsert_alert_inserts_and_updates(conn):
     )
     assert len(rows) == 1
     assert rows[0]["finished_at"] == "2026-09-03T21:00:00+00:00"
-    assert rows[0]["threat_type"] == "uav"
+    assert json.loads(rows[0]["threat_types"]) == ["drones"]
 
 
 def test_alerts_overlapping_excludes_outside_window(conn):
@@ -42,7 +44,7 @@ def test_alerts_overlapping_excludes_outside_window(conn):
         external_id="ext-2",
         location_uid="31",
         raw_alert_type="air_raid",
-        threat_type=None,
+        threat_types=[],
         started_at="2026-09-01T10:00:00+00:00",
         finished_at="2026-09-01T10:30:00+00:00",
         updated_at="2026-09-01T10:30:00+00:00",
@@ -59,7 +61,7 @@ def test_alerts_overlapping_filters_by_location(conn):
         external_id="ext-3",
         location_uid="30",
         raw_alert_type="air_raid",
-        threat_type=None,
+        threat_types=[],
         started_at="2026-09-03T20:00:00+00:00",
         finished_at="2026-09-03T21:00:00+00:00",
         updated_at="2026-09-03T21:00:00+00:00",

@@ -13,13 +13,8 @@
   "min_single_alert_minutes": 120,
 
   "ballistic_threshold_multiplier": 0.5,
-  "ballistic_threat_types": ["ballistic"],
-
-  "threat_type_keywords": {
-    "ballistic": ["ballistic", "балісти", "iskander", "iskander-m", "kinzhal", "кинджал"],
-    "aviation": ["aviation", "авіац", "kab", "каб"],
-    "uav": ["uav", "shahed", "шахед", "бпла", "дрон", "drone"]
-  },
+  "_ballistic_threat_types_comment": "Значення — реальний enum threats[].threat_type з alerts.in.ua (https://devs.alerts.in.ua/, модель Alert): ballistic_missiles, cruise_missiles, unspecified_missiles, tactic_aircraft_activity, strategic_aircraft_activity, mig31k_departure, guided_aerial_bombs, drones, air_defense, unknown. Тут лише 'ballistic_missiles' (ТЗ п.3 каже саме про балістику — крилаті ракети не балістичні); додайте unspecified_missiles/cruise_missiles якщо після місяця роботи вирішите прирівняти їх.",
+  "ballistic_threat_types": ["ballistic_missiles"],
 
   "preview_time": "07:01",
   "autopublish_time": "08:00",

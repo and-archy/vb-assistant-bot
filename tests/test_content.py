@@ -21,4 +21,4 @@ def test_thresholds_loaded(thresholds):
     assert thresholds.ballistic_threshold_multiplier == 0.5
     assert thresholds.night_window_start.hour == 22
     assert thresholds.night_window_end.hour == 7
-    assert "ballistic" in thresholds.threat_type_keywords
+    assert "ballistic_missiles" in thresholds.ballistic_threat_types

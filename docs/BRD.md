@@ -31,16 +31,16 @@ alerts.in.ua (`/v1/regions/{uid}/alerts/month_ago.json`, ключ у
 нумерація uid — відповідальність провайдера API, не гарантована цим
 документом).
 
-**Відкрите питання (чесно, не вигадуємо факт):** жодне з двох
-офіційних API (alerts.in.ua, ukrainealarm.com) не гарантує розбивку
-типу загрози на БпЛА/балістика/авіація — це категорія сирени
-(air_raid/artillery_shelling/...), не тип озброєння. Бот шукає
-ключові слова в тому, що фактично прийде в `alert_type` (конфіг
-`threat_type_keywords` у `thresholds.json`) — best-effort, а не
-гарантія. Якщо після місяця експлуатації з'ясується, що жодного
-сигналу немає — поле `threat_type` просто завжди `null`, і halving
-порогів (нижче) ніколи не спрацює; це не помилка бота, а обмеження
-джерела.
+**Тип загрози (БпЛА/балістика/авіація, ТЗ п.2):** `alert_type` з
+alerts.in.ua — лише категорія сирени (air_raid/artillery_shelling/...),
+не тип озброєння. Але API окремо віддає масив `threats[].threat_type`
+з точним типом (`ballistic_missiles`, `cruise_missiles`, `drones`,
+`tactic_aircraft_activity`, `guided_aerial_bombs` тощо —
+https://devs.alerts.in.ua/, модель Alert) — саме його бот і зберігає
+та звіряє з `ballistic_threat_types` у `thresholds.json` (halving
+порогів при `ballistic_missiles`). Поле присутнє лише коли джерело
+відкрило конкретну загрозу — за відсутності активних загроз масив
+порожній, і це коректний стан, не помилка бота.
 
 ## Логіка «важкої ночі»
 

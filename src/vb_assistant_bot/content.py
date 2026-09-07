@@ -1,5 +1,5 @@
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import time
 
 
@@ -28,7 +28,6 @@ class Thresholds:
     min_single_alert_minutes: int
     ballistic_threshold_multiplier: float
     ballistic_threat_types: frozenset[str]
-    threat_type_keywords: dict[str, tuple[str, ...]] = field(default_factory=dict)
     preview_time: time = time(7, 1)
     autopublish_time: time = time(8, 0)
     alerts_poll_interval_seconds: int = 90
@@ -61,11 +60,6 @@ def load_thresholds(path: str) -> Thresholds:
     with open(path, encoding="utf-8") as fh:
         raw = json.load(fh)
 
-    keywords = {
-        threat_type: tuple(words)
-        for threat_type, words in raw.get("threat_type_keywords", {}).items()
-    }
-
     return Thresholds(
         night_window_start=_parse_hhmm(raw["night_window_start"]),
         night_window_end=_parse_hhmm(raw["night_window_end"]),
@@ -76,8 +70,7 @@ def load_thresholds(path: str) -> Thresholds:
         min_total_duration_minutes=int(raw["min_total_duration_minutes"]),
         min_single_alert_minutes=int(raw["min_single_alert_minutes"]),
         ballistic_threshold_multiplier=float(raw["ballistic_threshold_multiplier"]),
-        ballistic_threat_types=frozenset(raw.get("ballistic_threat_types", ["ballistic"])),
-        threat_type_keywords=keywords,
+        ballistic_threat_types=frozenset(raw["ballistic_threat_types"]),
         preview_time=_parse_hhmm(raw.get("preview_time", "07:01")),
         autopublish_time=_parse_hhmm(raw.get("autopublish_time", "08:00")),
         alerts_poll_interval_seconds=int(raw.get("alerts_poll_interval_seconds", 90)),

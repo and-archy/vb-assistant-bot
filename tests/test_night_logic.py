@@ -1,19 +1,19 @@
 from datetime import date
 
 from vb_assistant_bot import db
-from vb_assistant_bot.night_logic import compute_night_stats, is_heavy_night, match_threat_type
+from vb_assistant_bot.night_logic import compute_night_stats, is_heavy_night
 
 _MORNING = date(2026, 1, 15)  # Kyiv EET (UTC+2) — без DST-плутанини
 _TZ = "Europe/Kyiv"
 
 
-def _add_alert(conn, ext_id, start_utc, end_utc, threat_type=None):
+def _add_alert(conn, ext_id, start_utc, end_utc, threat_types=None):
     db.upsert_alert(
         conn,
         external_id=ext_id,
         location_uid="31",
         raw_alert_type="air_raid",
-        threat_type=threat_type,
+        threat_types=threat_types or [],
         started_at=start_utc,
         finished_at=end_utc,
         updated_at=end_utc or start_utc,
@@ -78,7 +78,7 @@ def test_ballistic_halves_single_alert_threshold(conn, thresholds):
         "e1",
         "2026-01-14T21:00:00+00:00",
         "2026-01-14T22:00:00+00:00",
-        threat_type="ballistic",
+        threat_types=["ballistic_missiles"],
     )
     stats = _stats(conn, thresholds)
     assert stats.has_ballistic is True
@@ -107,13 +107,3 @@ def test_ongoing_alert_is_clipped_to_now(conn, thresholds):
     )
     assert stats.count == 1
     assert stats.longest.duration.total_seconds() == 30 * 60
-
-
-def test_match_threat_type_keywords(thresholds):
-    assert (
-        match_threat_type("Загроза балістичної зброї", thresholds.threat_type_keywords)
-        == "ballistic"
-    )
-    assert match_threat_type("shahed drones spotted", thresholds.threat_type_keywords) == "uav"
-    assert match_threat_type("air_raid", thresholds.threat_type_keywords) is None
-    assert match_threat_type(None, thresholds.threat_type_keywords) is None

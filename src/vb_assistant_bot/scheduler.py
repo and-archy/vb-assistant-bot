@@ -13,7 +13,7 @@ from vb_assistant_bot.config import Config
 from vb_assistant_bot.content import Texts, Thresholds
 from vb_assistant_bot.formatting import format_stats_summary
 from vb_assistant_bot.message_builder import build_message
-from vb_assistant_bot.night_logic import compute_night_stats, is_heavy_night, match_threat_type
+from vb_assistant_bot.night_logic import compute_night_stats, is_heavy_night
 from vb_assistant_bot.timeutil import to_canonical_utc_iso
 
 logger = logging.getLogger(__name__)
@@ -61,7 +61,6 @@ def register(application: Application, config: Config, thresholds: Thresholds) -
 async def poll_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = context.bot_data["conn"]
     config: Config = context.bot_data["config"]
-    thresholds: Thresholds = context.bot_data["thresholds"]
     client: AlertsInUaClient = context.bot_data["alerts_client"]
 
     try:
@@ -73,13 +72,12 @@ async def poll_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
     for record in records:
         if not record.external_id:
             continue
-        threat_type = match_threat_type(record.raw_alert_type, thresholds.threat_type_keywords)
         db.upsert_alert(
             conn,
             external_id=record.external_id,
             location_uid=record.location_uid,
             raw_alert_type=record.raw_alert_type,
-            threat_type=threat_type,
+            threat_types=list(record.threat_types),
             started_at=to_canonical_utc_iso(record.started_at),
             finished_at=to_canonical_utc_iso(record.finished_at) if record.finished_at else None,
             updated_at=to_canonical_utc_iso(record.updated_at),

@@ -42,13 +42,21 @@ alerts.in.ua ──poll (JobQueue.run_repeating)──▶ [1] alerts_client + ti
 `GET /v1/regions/{uid}/alerts/month_ago.json`, `Authorization: Bearer
 <ALERTS_API_TOKEN>`. Обрано історичний ендпоінт (не `active.json`),
 бо він одразу дає `started_at`/`finished_at` — не треба самим
-детектувати кінець тривоги опитуванням.
+детектувати кінець тривоги опитуванням. У цього ендпоінту окремий,
+жорсткіший ліміт — 2 запити/хв (https://devs.alerts.in.ua/,
+«Обмеження») — `alerts_poll_interval_seconds` (дефолт 90с ≈ 0.67/хв)
+вкладається з запасом.
 
-Поля API розібрані через `.get()` best-effort — офіційна схема може
-змінитись. `alert_type`, який API справді віддає, — категорія сирени,
-не тип озброєння; `night_logic.match_threat_type` шукає ключові слова
-з `thresholds.threat_type_keywords` у тому, що прийшло (БпЛА/
-балістика/авіація — «якщо джерело віддає», ТЗ п.2).
+Поля API розібрані через `.get()` — офіційна схема може змінитись.
+`alert_type` — категорія сирени (air_raid/artillery_shelling/...), не
+тип озброєння; точний тип (ТЗ п.2: БпЛА/балістика/авіація) API окремо
+віддає в масиві `threats[].threat_type` (enum: `ballistic_missiles`,
+`cruise_missiles`, `unspecified_missiles`, `drones`,
+`tactic_aircraft_activity`, `strategic_aircraft_activity`,
+`mig31k_departure`, `guided_aerial_bombs`, `air_defense`, `unknown`) —
+`AlertRecord.threat_types` парсить це поле напряму, без здогадок.
+Масив порожній, якщо джерело не відкрило жодної конкретної загрози
+(коректний стан, не помилка).
 
 `timeutil.to_canonical_utc_iso` нормалізує кожен запис до фіксованого
 UTC ISO8601 (`+00:00`, без мілісекунд/`Z`) **перед** записом у БД —

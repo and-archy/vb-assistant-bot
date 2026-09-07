@@ -14,16 +14,18 @@ _REQUEST_TIMEOUT_SECONDS = 15
 class AlertRecord:
     """Один запис тривоги з alerts.in.ua.
 
-    Поля розібрані з відповіді API best-effort через .get() — офіційна
-    схема може мінятись, і `alert_type`, який API справді віддає, це
-    категорія сирени (air_raid/artillery_shelling/urban_fights/...), а
-    не тип озброєння (БпЛА/балістика/авіація з ТЗ п.2). Точний тип
-    озброєння джерело може взагалі не надавати — див. content.py
-    threat_type_keywords (найкраще з можливого зіставлення за словами)."""
+    `raw_alert_type` — категорія сирени (air_raid/artillery_shelling/...),
+    НЕ тип озброєння. Тип озброєння (ТЗ п.2: БпЛА/балістика/авіація) API
+    таки віддає окремо — масив `threats[].threat_type`
+    (drones/ballistic_missiles/cruise_missiles/tactic_aircraft_activity/...,
+    https://devs.alerts.in.ua/ → модель Alert). Поле присутнє лише коли
+    відкрита хоч одна конкретна загроза — інакше `threats` відсутній і
+    `threat_types` тут порожній кортеж."""
 
     external_id: str
     location_uid: str
     raw_alert_type: str | None
+    threat_types: tuple[str, ...]
     started_at: str
     finished_at: str | None
     updated_at: str
@@ -62,10 +64,13 @@ class AlertsInUaClient:
     @staticmethod
     def _parse_alert(item: dict) -> AlertRecord:
         external_id = str(item.get("id") or item.get("alert_id") or "")
+        threats = item.get("threats") or []
+        threat_types = tuple(t["threat_type"] for t in threats if t.get("threat_type"))
         return AlertRecord(
             external_id=external_id,
             location_uid=str(item.get("location_uid", "")),
             raw_alert_type=item.get("alert_type"),
+            threat_types=threat_types,
             started_at=item["started_at"],
             finished_at=item.get("finished_at"),
             updated_at=item.get("updated_at") or item["started_at"],

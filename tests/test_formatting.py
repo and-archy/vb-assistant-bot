@@ -27,7 +27,7 @@ def _alert(start_h, start_m, end_h, end_m):
     return AlertWindow(
         started_at=start,
         finished_at=end,
-        threat_type=None,
+        threat_types=(),
         ongoing=False,
         crosses_hard_window=False,
     )

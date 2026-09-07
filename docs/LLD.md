@@ -13,7 +13,7 @@ src/vb_assistant_bot/
     db.py                # SQLite schema + CRUD
     timeutil.py          # парсинг/нормалізація ISO8601 з alerts.in.ua
     alerts_client.py     # AlertsInUaClient
-    night_logic.py        # compute_night_stats, is_heavy_night, match_threat_type
+    night_logic.py        # compute_night_stats, is_heavy_night
     deck.py                # перетасована колода
     message_builder.py     # build_message
     formatting.py           # format_stats_summary (текст прев'ю)
@@ -67,8 +67,7 @@ class Thresholds:
     min_total_duration_minutes: int
     min_single_alert_minutes: int
     ballistic_threshold_multiplier: float
-    ballistic_threat_types: frozenset[str]
-    threat_type_keywords: dict[str, tuple[str, ...]]
+    ballistic_threat_types: frozenset[str]   # звіряється з AlertWindow.threat_types
     preview_time: time; autopublish_time: time
     alerts_poll_interval_seconds: int
 
@@ -81,7 +80,8 @@ def load_thresholds(path: str) -> Thresholds: ...
 @dataclass(frozen=True)
 class AlertWindow:
     started_at: datetime; finished_at: datetime
-    threat_type: str | None; ongoing: bool; crosses_hard_window: bool
+    threat_types: tuple[str, ...]   # напряму з alerts.in.ua threats[].threat_type
+    ongoing: bool; crosses_hard_window: bool
     @property
     def duration(self) -> timedelta: ...
 
@@ -96,8 +96,6 @@ class NightStats:
 def compute_night_stats(conn, *, location_uid, morning_date, timezone,
                          thresholds, now=None) -> NightStats: ...
 def is_heavy_night(stats: NightStats, thresholds: Thresholds) -> bool: ...
-def match_threat_type(raw_alert_type: str | None,
-                       keywords: dict[str, tuple[str, ...]]) -> str | None: ...
 ```
 
 ```python

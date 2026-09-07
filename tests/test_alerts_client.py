@@ -36,6 +36,29 @@ def test_fetch_region_history_parses_list_payload():
     assert records[0].location_uid == "31"
     assert records[0].raw_alert_type == "air_raid"
     assert records[0].finished_at == "2026-01-14T21:00:00.000Z"
+    assert records[0].threat_types == ()
+
+
+def test_fetch_region_history_parses_threats_array():
+    payload = [
+        {
+            "id": 5,
+            "location_uid": "31",
+            "alert_type": "air_raid",
+            "started_at": "2026-01-14T20:00:00.000Z",
+            "finished_at": None,
+            "updated_at": "2026-01-14T20:00:00.000Z",
+            "threats": [
+                {"threat_type": "ballistic_missiles", "level": "red"},
+                {"threat_type": "drones", "level": "yellow"},
+            ],
+        }
+    ]
+    client = AlertsInUaClient("token")
+    with patch("urllib.request.urlopen", return_value=_fake_response(payload)):
+        records = client.fetch_region_history("31")
+
+    assert records[0].threat_types == ("ballistic_missiles", "drones")
 
 
 def test_fetch_region_history_parses_wrapped_payload():

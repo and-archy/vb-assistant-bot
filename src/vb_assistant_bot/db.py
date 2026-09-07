@@ -7,7 +7,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     external_id   TEXT NOT NULL UNIQUE,
     location_uid  TEXT NOT NULL,
     raw_alert_type TEXT,
-    threat_type   TEXT,
+    threat_types  TEXT NOT NULL DEFAULT '[]',
     started_at    TEXT NOT NULL,
     finished_at   TEXT,
     updated_at    TEXT NOT NULL
@@ -89,7 +89,7 @@ def upsert_alert(
     external_id: str,
     location_uid: str,
     raw_alert_type: str | None,
-    threat_type: str | None,
+    threat_types: list[str],
     started_at: str,
     finished_at: str | None,
     updated_at: str,
@@ -97,12 +97,12 @@ def upsert_alert(
     conn.execute(
         """
         INSERT INTO alerts
-            (external_id, location_uid, raw_alert_type, threat_type,
+            (external_id, location_uid, raw_alert_type, threat_types,
              started_at, finished_at, updated_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (external_id) DO UPDATE SET
             raw_alert_type = excluded.raw_alert_type,
-            threat_type    = excluded.threat_type,
+            threat_types   = excluded.threat_types,
             started_at     = excluded.started_at,
             finished_at    = excluded.finished_at,
             updated_at     = excluded.updated_at
@@ -111,7 +111,7 @@ def upsert_alert(
             external_id,
             location_uid,
             raw_alert_type,
-            threat_type,
+            json.dumps(threat_types),
             started_at,
             finished_at,
             updated_at,
