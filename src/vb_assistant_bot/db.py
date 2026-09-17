@@ -81,8 +81,13 @@ def init_db(db_path: str) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_SCHEMA)
-    # Міграція для БД, створених до появи triggered (2026-09-17 — інцидент
-    # з мовчазним провалом /support і автопрев'ю, ТЗ п.4 доопрацьовано).
+    # Міграції для БД, створених до появи цих колонок — CREATE TABLE IF NOT
+    # EXISTS у _SCHEMA не чіпає вже існуючі таблиці, тому нові колонки
+    # довелось додавати вручну (2026-09-18 — на проді впала помилка
+    # "table alerts has no column named threat_types", бо ця міграція
+    # спершу забулась зовсім).
+    if not _column_exists(conn, "alerts", "threat_types"):
+        conn.execute("ALTER TABLE alerts ADD COLUMN threat_types TEXT NOT NULL DEFAULT '[]'")
     if not _column_exists(conn, "preview_state", "triggered"):
         conn.execute("ALTER TABLE preview_state ADD COLUMN triggered INTEGER NOT NULL DEFAULT 0")
     conn.commit()

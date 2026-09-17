@@ -1,6 +1,46 @@
 import json
+import sqlite3
 
 from vb_assistant_bot import db
+
+
+def test_init_db_migrates_legacy_schema_without_new_columns(tmp_path):
+    """Регрес 2026-09-18: сервер мав alerts/preview_state зі старої схеми
+    (до threat_types/triggered), і init_db падав з
+    'table alerts has no column named threat_types'."""
+    path = str(tmp_path / "legacy.db")
+    legacy = sqlite3.connect(path)
+    legacy.execute(
+        """CREATE TABLE alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, external_id TEXT NOT NULL UNIQUE,
+            location_uid TEXT NOT NULL, raw_alert_type TEXT, threat_type TEXT,
+            started_at TEXT NOT NULL, finished_at TEXT, updated_at TEXT NOT NULL
+        )"""
+    )
+    legacy.execute(
+        """CREATE TABLE preview_state (
+            morning_date TEXT PRIMARY KEY, status TEXT NOT NULL, day_type TEXT NOT NULL,
+            variant_set TEXT NOT NULL, variant_id TEXT NOT NULL, message_text TEXT NOT NULL,
+            stats_json TEXT NOT NULL, created_at TEXT NOT NULL, resolved_at TEXT,
+            resolved_by INTEGER
+        )"""
+    )
+    legacy.commit()
+    legacy.close()
+
+    conn = db.init_db(path)
+    db.upsert_alert(
+        conn,
+        external_id="e1",
+        location_uid="31",
+        raw_alert_type="air_raid",
+        threat_types=["drones"],
+        started_at="2026-09-18T02:00:00+00:00",
+        finished_at=None,
+        updated_at="2026-09-18T02:00:00+00:00",
+    )
+    row = conn.execute("SELECT * FROM alerts WHERE external_id = 'e1'").fetchone()
+    assert json.loads(row["threat_types"]) == ["drones"]
 
 
 def test_upsert_alert_inserts_and_updates(conn):
