@@ -101,11 +101,13 @@ def test_preview_lifecycle(conn):
         variant_id="A1",
         message_text="текст",
         stats_json="{}",
+        triggered=True,
         created_at="2026-09-04T07:01:00+00:00",
     )
     preview = db.get_preview(conn, "2026-09-04")
     assert preview["status"] == "pending"
     assert preview["variant_id"] == "A1"
+    assert preview["triggered"] == 1
 
     db.add_preview_message(conn, "2026-09-04", 111, 999)
     db.add_preview_message(conn, "2026-09-04", 222, 1000)
@@ -135,6 +137,7 @@ def test_upsert_preview_resets_resolution_and_messages(conn):
         variant_id="A1",
         message_text="текст",
         stats_json="{}",
+        triggered=True,
         created_at="2026-09-04T07:01:00+00:00",
     )
     db.add_preview_message(conn, "2026-09-04", 111, 999)
@@ -150,6 +153,7 @@ def test_upsert_preview_resets_resolution_and_messages(conn):
         variant_id="A2",
         message_text="новий текст",
         stats_json="{}",
+        triggered=True,
         created_at="2026-09-04T09:00:00+00:00",
     )
     preview = db.get_preview(conn, "2026-09-04")

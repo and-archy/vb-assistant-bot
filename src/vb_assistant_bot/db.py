@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS preview_state (
     variant_id    TEXT NOT NULL,
     message_text  TEXT NOT NULL,
     stats_json    TEXT NOT NULL,
+    triggered     INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL,
     resolved_at   TEXT,
     resolved_by   INTEGER
@@ -71,11 +72,19 @@ CREATE TABLE IF NOT EXISTS send_log (
 """
 
 
+def _column_exists(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row["name"] == column for row in conn.execute(f"PRAGMA table_info({table})"))
+
+
 def init_db(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_SCHEMA)
+    # Міграція для БД, створених до появи triggered (2026-09-17 — інцидент
+    # з мовчазним провалом /support і автопрев'ю, ТЗ п.4 доопрацьовано).
+    if not _column_exists(conn, "preview_state", "triggered"):
+        conn.execute("ALTER TABLE preview_state ADD COLUMN triggered INTEGER NOT NULL DEFAULT 0")
     conn.commit()
     return conn
 
@@ -212,14 +221,15 @@ def upsert_preview(
     variant_id: str,
     message_text: str,
     stats_json: str,
+    triggered: bool,
     created_at: str,
 ) -> None:
     conn.execute(
         """
         INSERT INTO preview_state
             (morning_date, status, day_type, variant_set, variant_id,
-             message_text, stats_json, created_at, resolved_at, resolved_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+             message_text, stats_json, triggered, created_at, resolved_at, resolved_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
         ON CONFLICT (morning_date) DO UPDATE SET
             status = excluded.status,
             day_type = excluded.day_type,
@@ -227,6 +237,7 @@ def upsert_preview(
             variant_id = excluded.variant_id,
             message_text = excluded.message_text,
             stats_json = excluded.stats_json,
+            triggered = excluded.triggered,
             created_at = excluded.created_at,
             resolved_at = NULL,
             resolved_by = NULL
@@ -239,6 +250,7 @@ def upsert_preview(
             variant_id,
             message_text,
             stats_json,
+            int(triggered),
             created_at,
         ),
     )

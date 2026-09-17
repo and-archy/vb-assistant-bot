@@ -105,12 +105,26 @@ def draw_next(conn, set_name: str, variants: tuple[Variant, ...]) -> Variant: ..
 
 ```python
 # scheduler.py
+@dataclass(frozen=True)
+class PreviewResult:
+    generated: bool          # False лише коли сьогодні вже оброблено (force=False), не помилка
+    sent_to: int = 0
+    admin_count: int = 0
+    triggered: bool = False  # вердикт is_heavy_night — лише рекомендаційний з 2026-09-17
+
 def determine_day_type(conn, morning_date: date) -> str: ...       # "workday"/"weekend"
 async def poll_alerts(context) -> None: ...
-async def generate_and_send_preview(context, *, force: bool) -> bool: ...
+async def generate_and_send_preview(context, *, force: bool) -> PreviewResult: ...  # шле завжди
 async def job_preview(context) -> None: ...
-async def job_autopublish(context) -> None: ...
+async def job_autopublish(context) -> None: ...   # публікує/нагадує лише якщо preview.triggered
 async def on_preview_action(update, context) -> None: ...          # callback_data "prev:<date>:<action>"
+```
+
+```python
+# __main__.py
+async def on_error(update, context: ContextTypes.DEFAULT_TYPE) -> None: ...
+# зареєстрований через application.add_error_handler — будь-яка
+# необроблена помилка шле ADMIN_USER_IDS "⚠️ Помилка в боті: ...".
 ```
 
 ## Callback data формат
@@ -126,7 +140,7 @@ async def on_preview_action(update, context) -> None: ...          # callback_da
 | Команда | Доступ | Дія |
 |---|---|---|
 | `/start`, `/help` | адміни | довідка |
-| `/support` | адміни | `generate_and_send_preview(force=True)` |
+| `/support` | адміни | `generate_and_send_preview(force=True)`, завжди відповідає в чат виклику |
 | `/markweekend [дд.мм.рррр]` | адміни | `manual_day_type[day] = "weekend"` |
 | `/markworkday [дд.мм.рррр]` | адміни | `manual_day_type[day] = "workday"` |
 

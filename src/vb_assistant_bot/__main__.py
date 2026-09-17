@@ -3,13 +3,16 @@ import logging.handlers
 import os
 
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler
+from telegram.error import TelegramError
+from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from vb_assistant_bot import db, scheduler
 from vb_assistant_bot.alerts_client import AlertsInUaClient
-from vb_assistant_bot.config import load_config
+from vb_assistant_bot.config import Config, load_config
 from vb_assistant_bot.content import load_texts, load_thresholds
 from vb_assistant_bot.handlers import menu, support, weekend
+
+logger = logging.getLogger(__name__)
 
 _LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
 _LOG_MAX_BYTES = 5_000_000
@@ -26,6 +29,22 @@ def _configure_logging() -> None:
             )
         )
     logging.basicConfig(format=_LOG_FORMAT, level=logging.INFO, handlers=handlers)
+
+
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Без цього необроблена помилка в будь-якому хендлері/джобі просто
+    логувалась і зникала — жоден адмін не дізнавався, що бот щось не
+    зробив (інцидент 2026-09-17: /support мовчав при збої)."""
+    logger.error("Необроблена помилка при обробці %s", update, exc_info=context.error)
+    config: Config | None = context.bot_data.get("config")
+    if config is None:
+        return
+    text = f"⚠️ Помилка в боті: {context.error}"
+    for admin_id in config.admin_user_ids:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text)
+        except TelegramError:
+            pass
 
 
 def main() -> None:
@@ -48,6 +67,7 @@ def main() -> None:
     application.add_handler(CommandHandler("markweekend", weekend.mark_weekend))
     application.add_handler(CommandHandler("markworkday", weekend.mark_workday))
     application.add_handler(CallbackQueryHandler(scheduler.on_preview_action, pattern=r"^prev:"))
+    application.add_error_handler(on_error)
 
     scheduler.register(application, config, thresholds)
 

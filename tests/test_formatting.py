@@ -35,12 +35,13 @@ def _alert(start_h, start_m, end_h, end_m):
 
 def test_format_stats_summary_no_alerts():
     stats = _make_stats([])
-    assert format_stats_summary(stats) == "Статистика ночі: тривог не зафіксовано."
+    text = format_stats_summary(stats, triggered=False)
+    assert text.startswith("Статистика ночі: тривог не зафіксовано.")
 
 
 def test_format_stats_summary_pluralization_and_duration():
     stats = _make_stats([_alert(2, 10, 5, 15)])
-    text = format_stats_summary(stats)
+    text = format_stats_summary(stats, triggered=True)
     assert "1 тривога" in text
     assert "3 год 5 хв" in text
     assert "02:10–05:15" in text
@@ -48,11 +49,17 @@ def test_format_stats_summary_pluralization_and_duration():
 
 def test_format_stats_summary_plural_few():
     stats = _make_stats([_alert(1, 0, 1, 30), _alert(2, 0, 2, 30), _alert(3, 0, 3, 30)])
-    text = format_stats_summary(stats)
+    text = format_stats_summary(stats, triggered=True)
     assert "3 тривоги" in text
 
 
 def test_format_stats_summary_ballistic_note():
     stats = _make_stats([_alert(2, 10, 5, 15)], has_ballistic=True)
-    text = format_stats_summary(stats)
+    text = format_stats_summary(stats, triggered=True)
     assert "балістики" in text
+
+
+def test_format_stats_summary_shows_triggered_verdict():
+    stats = _make_stats([_alert(2, 10, 5, 15)])
+    assert "визнана важкою" in format_stats_summary(stats, triggered=True)
+    assert "НЕ визнана важкою" in format_stats_summary(stats, triggered=False)

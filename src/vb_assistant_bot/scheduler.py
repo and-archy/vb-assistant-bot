@@ -1,5 +1,6 @@
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
@@ -21,6 +22,14 @@ logger = logging.getLogger(__name__)
 _DEFAULT_SET_WEEKDAY = "A"
 _DEFAULT_SET_WEEKEND = "V"
 _CALM_SET = "B"
+
+
+@dataclass(frozen=True)
+class PreviewResult:
+    generated: bool  # False лише коли сьогодні вже оброблено (не force) — не помилка
+    sent_to: int = 0
+    admin_count: int = 0
+    triggered: bool = False
 
 
 def determine_day_type(conn, morning_date: date) -> str:
@@ -84,9 +93,20 @@ async def poll_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
-async def generate_and_send_preview(context: ContextTypes.DEFAULT_TYPE, *, force: bool) -> bool:
-    """Повертає True, якщо прев'ю надіслано. force=True — ручний /support,
-    ігнорує результат тригера (ТЗ п.4)."""
+async def generate_and_send_preview(
+    context: ContextTypes.DEFAULT_TYPE, *, force: bool
+) -> PreviewResult:
+    """Формує й шле прев'ю в особисті всім адмінам — БЕЗУМОВНО (з 2026-09-17,
+    після інциденту з мовчазним провалом: масований обстріл не пробив
+    пороги тригера, і бот нічого не надіслав). Тригер (`is_heavy_night`)
+    тепер лише рекомендаційний рядок у тексті — публікацію в групу
+    все одно вирішує людина (ТЗ п.4), а `job_autopublish` враховує
+    `triggered` окремо (безлюдна автопублікація має сенс лише коли
+    алгоритм і так рекомендував).
+
+    force=False (щоденна джоба) — якщо на сьогодні прев'ю вже
+    оброблено (sent/skipped/auto_sent), не дублює. force=True
+    (`/support`) — завжди перегенеровує, ігноруючи попереднє рішення."""
     conn = context.bot_data["conn"]
     config: Config = context.bot_data["config"]
     texts: Texts = context.bot_data["texts"]
@@ -94,6 +114,12 @@ async def generate_and_send_preview(context: ContextTypes.DEFAULT_TYPE, *, force
 
     tz = ZoneInfo(config.timezone)
     morning_date = datetime.now(tz).date()
+    morning_key = morning_date.isoformat()
+
+    if not force:
+        existing = db.get_preview(conn, morning_key)
+        if existing is not None and existing["status"] != "pending":
+            return PreviewResult(generated=False)
 
     stats = compute_night_stats(
         conn,
@@ -103,8 +129,6 @@ async def generate_and_send_preview(context: ContextTypes.DEFAULT_TYPE, *, force
         thresholds=thresholds,
     )
     triggered = is_heavy_night(stats, thresholds)
-    if not triggered and not force:
-        return False
 
     day_type = determine_day_type(conn, morning_date)
     default_set = _DEFAULT_SET_WEEKEND if day_type == "weekend" else _DEFAULT_SET_WEEKDAY
@@ -112,7 +136,6 @@ async def generate_and_send_preview(context: ContextTypes.DEFAULT_TYPE, *, force
     include_arrangements = day_type == "workday"
     message_text = build_message(texts, variant, include_arrangements=include_arrangements)
 
-    morning_key = morning_date.isoformat()
     db.upsert_preview(
         conn,
         morning_date=morning_key,
@@ -121,13 +144,15 @@ async def generate_and_send_preview(context: ContextTypes.DEFAULT_TYPE, *, force
         variant_set=default_set,
         variant_id=variant.id,
         message_text=message_text,
-        stats_json=json.dumps({"count": stats.count, "triggered": triggered}),
+        stats_json=json.dumps({"count": stats.count}),
+        triggered=triggered,
         created_at=datetime.now(UTC).isoformat(),
     )
 
-    intro = format_stats_summary(stats)
+    intro = format_stats_summary(stats, triggered)
     body = f"{intro}\n\nГотовий текст:\n{message_text}"
     keyboard = _preview_keyboard(morning_key)
+    sent_to = 0
     for admin_id in config.admin_user_ids:
         try:
             sent = await context.bot.send_message(
@@ -137,12 +162,25 @@ async def generate_and_send_preview(context: ContextTypes.DEFAULT_TYPE, *, force
             logger.error("Не вдалося надіслати прев'ю адміну %s: %s", admin_id, exc)
             continue
         db.add_preview_message(conn, morning_key, admin_id, sent.message_id)
+        sent_to += 1
 
-    return True
+    return PreviewResult(
+        generated=True,
+        sent_to=sent_to,
+        admin_count=len(config.admin_user_ids),
+        triggered=triggered,
+    )
 
 
 async def job_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
-    await generate_and_send_preview(context, force=False)
+    result = await generate_and_send_preview(context, force=False)
+    if result.generated:
+        logger.info(
+            "Ранкове прев'ю: надіслано %s/%s адмінам, triggered=%s",
+            result.sent_to,
+            result.admin_count,
+            result.triggered,
+        )
 
 
 async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -153,6 +191,11 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     preview = db.get_preview(conn, morning_key)
     if preview is None or preview["status"] != "pending":
+        return
+    if not preview["triggered"]:
+        # Алгоритм не вважав ніч важкою — без реакції адміна це і є
+        # правильний результат (ТЗ п.4: тиша по спокійній ночі), нагадувати
+        # чи публікувати самостійно нема сенсу.
         return
 
     if not config.auto_publish_enabled:

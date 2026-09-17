@@ -21,17 +21,27 @@ def _format_duration(delta: timedelta) -> str:
     return f"{minutes} хв"
 
 
-def format_stats_summary(stats: NightStats) -> str:
+def format_stats_summary(stats: NightStats, triggered: bool) -> str:
+    """triggered — вердикт алгоритму (ТЗ п.3), суто рекомендаційний з
+    2026-09-17: прев'ю тепер надсилається щоранку незалежно від нього
+    (інцидент 17.09 — масований обстріл не пробив пороги тривалості,
+    і бот мовчав; тепер людина завжди бачить статистику й вирішує сама)."""
     if stats.count == 0:
-        return "Статистика ночі: тривог не зафіксовано."
+        summary = "Статистика ночі: тривог не зафіксовано."
+    else:
+        parts = [f"Статистика ночі: {stats.count} {_pluralize_alerts(stats.count)}"]
+        parts.append(f"сумарно {_format_duration(stats.total_duration)}")
+        if stats.longest is not None:
+            start = stats.longest.started_at.strftime("%H:%M")
+            end = stats.longest.finished_at.strftime("%H:%M")
+            parts.append(f"з них найдовша {start}–{end}")
+        summary = ", ".join(parts) + "."
+        if stats.has_ballistic:
+            summary += " Зафіксовано загрозу балістики."
 
-    parts = [f"Статистика ночі: {stats.count} {_pluralize_alerts(stats.count)}"]
-    parts.append(f"сумарно {_format_duration(stats.total_duration)}")
-    if stats.longest is not None:
-        start = stats.longest.started_at.strftime("%H:%M")
-        end = stats.longest.finished_at.strftime("%H:%M")
-        parts.append(f"з них найдовша {start}–{end}")
-    summary = ", ".join(parts) + "."
-    if stats.has_ballistic:
-        summary += " Зафіксовано загрозу балістики."
-    return summary
+    verdict = (
+        "Алгоритм: ніч визнана важкою."
+        if triggered
+        else "Алгоритм: ніч НЕ визнана важкою — рішення надсилати чи ні за вами."
+    )
+    return f"{summary}\n{verdict}"
