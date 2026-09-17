@@ -8,11 +8,15 @@ from vb_assistant_bot import db
 from vb_assistant_bot.content import Thresholds
 from vb_assistant_bot.timeutil import parse_api_datetime
 
+_MISSILE_ALERT_LEVEL = "red"
+_DRONE_ALERT_LEVEL = "yellow"
+
 
 @dataclass(frozen=True)
 class AlertWindow:
     started_at: datetime
     finished_at: datetime
+    alert_level: str | None  # "red" = ракетна небезпека, "yellow" = дронова (alerts.in.ua)
     threat_types: tuple[str, ...]
     ongoing: bool
     crosses_hard_window: bool
@@ -35,6 +39,22 @@ class NightStats:
     @property
     def count(self) -> int:
         return len(self.alerts)
+
+    @property
+    def missile_alerts(self) -> tuple[AlertWindow, ...]:
+        return tuple(a for a in self.alerts if a.alert_level == _MISSILE_ALERT_LEVEL)
+
+    @property
+    def drone_alerts(self) -> tuple[AlertWindow, ...]:
+        return tuple(a for a in self.alerts if a.alert_level == _DRONE_ALERT_LEVEL)
+
+    @property
+    def missile_duration(self) -> timedelta:
+        return sum((a.duration for a in self.missile_alerts), start=timedelta())
+
+    @property
+    def drone_duration(self) -> timedelta:
+        return sum((a.duration for a in self.drone_alerts), start=timedelta())
 
 
 def _localize(d: date, t: time, tz: ZoneInfo) -> datetime:
@@ -88,6 +108,7 @@ def compute_night_stats(
         alert = AlertWindow(
             started_at=clipped_start,
             finished_at=clipped_end,
+            alert_level=row["alert_level"],
             threat_types=tuple(json.loads(row["threat_types"] or "[]")),
             ongoing=ongoing,
             crosses_hard_window=clipped_start < hard_end and clipped_end > hard_start,

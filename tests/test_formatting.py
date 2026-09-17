@@ -21,12 +21,13 @@ def _make_stats(alerts, has_ballistic=False):
     )
 
 
-def _alert(start_h, start_m, end_h, end_m):
+def _alert(start_h, start_m, end_h, end_m, alert_level=None):
     start = datetime(2026, 1, 15, start_h, start_m, tzinfo=_TZ)
     end = datetime(2026, 1, 15, end_h, end_m, tzinfo=_TZ)
     return AlertWindow(
         started_at=start,
         finished_at=end,
+        alert_level=alert_level,
         threat_types=(),
         ongoing=False,
         crosses_hard_window=False,
@@ -63,3 +64,21 @@ def test_format_stats_summary_shows_triggered_verdict():
     stats = _make_stats([_alert(2, 10, 5, 15)])
     assert "визнана важкою" in format_stats_summary(stats, triggered=True)
     assert "НЕ визнана важкою" in format_stats_summary(stats, triggered=False)
+
+
+def test_format_stats_summary_missile_and_drone_breakdown():
+    stats = _make_stats(
+        [
+            _alert(21, 0, 22, 0, alert_level="red"),
+            _alert(23, 0, 23, 30, alert_level="yellow"),
+        ]
+    )
+    text = format_stats_summary(stats, triggered=True)
+    assert "ракетна загроза — 1 тривога, 1 год" in text
+    assert "дронова загроза — 1 тривога, 30 хв" in text
+
+
+def test_format_stats_summary_no_breakdown_without_alert_level():
+    stats = _make_stats([_alert(2, 10, 5, 15)])
+    text = format_stats_summary(stats, triggered=True)
+    assert "У т.ч." not in text

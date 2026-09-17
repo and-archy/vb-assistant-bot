@@ -21,6 +21,30 @@ def _format_duration(delta: timedelta) -> str:
     return f"{minutes} хв"
 
 
+def _format_breakdown_line(stats: NightStats) -> str | None:
+    """Розбивка за alert_level (2026-09-18): 'red' = ракетна небезпека,
+    'yellow' = дронова — присутнє в кожному записі alerts.in.ua (на
+    відміну від threats[], яке на практиці завжди порожнє). Рядок
+    з'являється лише якщо є хоч одна категоризована тривога."""
+    missile_count = len(stats.missile_alerts)
+    drone_count = len(stats.drone_alerts)
+    if not missile_count and not drone_count:
+        return None
+
+    parts = []
+    if missile_count:
+        parts.append(
+            f"ракетна загроза — {missile_count} {_pluralize_alerts(missile_count)}, "
+            f"{_format_duration(stats.missile_duration)}"
+        )
+    if drone_count:
+        parts.append(
+            f"дронова загроза — {drone_count} {_pluralize_alerts(drone_count)}, "
+            f"{_format_duration(stats.drone_duration)}"
+        )
+    return "У т.ч.: " + "; ".join(parts) + "."
+
+
 def format_stats_summary(stats: NightStats, triggered: bool) -> str:
     """triggered — вердикт алгоритму (ТЗ п.3), суто рекомендаційний з
     2026-09-17: прев'ю тепер надсилається щоранку незалежно від нього
@@ -38,6 +62,9 @@ def format_stats_summary(stats: NightStats, triggered: bool) -> str:
         summary = ", ".join(parts) + "."
         if stats.has_ballistic:
             summary += " Зафіксовано загрозу балістики."
+        breakdown = _format_breakdown_line(stats)
+        if breakdown:
+            summary += f"\n{breakdown}"
 
     verdict = (
         "Алгоритм: ніч визнана важкою."

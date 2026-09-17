@@ -16,15 +16,20 @@ class AlertRecord:
 
     `raw_alert_type` — категорія сирени (air_raid/artillery_shelling/...),
     НЕ тип озброєння. Тип озброєння (ТЗ п.2: БпЛА/балістика/авіація) API
-    таки віддає окремо — масив `threats[].threat_type`
+    задокументовано віддає окремо — масив `threats[].threat_type`
     (drones/ballistic_missiles/cruise_missiles/tactic_aircraft_activity/...,
-    https://devs.alerts.in.ua/ → модель Alert). Поле присутнє лише коли
-    відкрита хоч одна конкретна загроза — інакше `threats` відсутній і
-    `threat_types` тут порожній кортеж."""
+    https://devs.alerts.in.ua/ → модель Alert) — але на практиці (~150
+    тривог за місяць, перевірено 2026-09-09) це поле завжди відсутнє.
+
+    `alert_level` (`red`/`yellow`) натомість присутнє в КОЖНОМУ записі —
+    ракетна/дронова небезпека відповідно (підтверджено користувачем,
+    2026-09-18) — саме на ньому побудована розбивка нічної статистики
+    (`night_logic`), а не на `threat_types`."""
 
     external_id: str
     location_uid: str
     raw_alert_type: str | None
+    alert_level: str | None
     threat_types: tuple[str, ...]
     started_at: str
     finished_at: str | None
@@ -70,6 +75,7 @@ class AlertsInUaClient:
             external_id=external_id,
             location_uid=str(item.get("location_uid", "")),
             raw_alert_type=item.get("alert_type"),
+            alert_level=item.get("alert_level"),
             threat_types=threat_types,
             started_at=item["started_at"],
             finished_at=item.get("finished_at"),

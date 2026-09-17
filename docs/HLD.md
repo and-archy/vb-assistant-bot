@@ -86,7 +86,8 @@ CREATE TABLE alerts (
     external_id TEXT NOT NULL UNIQUE,
     location_uid TEXT NOT NULL,
     raw_alert_type TEXT,
-    threat_types TEXT NOT NULL DEFAULT '[]',  -- JSON-масив
+    alert_level TEXT,              -- "red"/"yellow" — присутнє завжди, на відміну від threats
+    threat_types TEXT NOT NULL DEFAULT '[]',  -- JSON-масив, на практиці завжди порожній
     started_at TEXT NOT NULL,     -- канонічний UTC ISO8601
     finished_at TEXT,             -- NULL = ще триває
     updated_at TEXT NOT NULL
@@ -132,6 +133,14 @@ CREATE TABLE send_log (
 (01:00–05:00). `is_heavy_night` застосовує пороги з `thresholds.json`
 (ТЗ п.3) — множник `ballistic_threshold_multiplier` на порогах
 тривалості, якщо `has_ballistic`.
+
+**Розбивка ракетна/дронова (2026-09-18):** `NightStats.missile_alerts`/
+`missile_duration` (alert_level == "red") і `drone_alerts`/
+`drone_duration` ("yellow") — властивості, обчислені з `stats.alerts`,
+не окремі поля тригера. Показуються в `format_stats_summary` для
+орієнтації адміна, **не впливають** на `is_heavy_night` — halving
+порогів і далі керується `threat_types`/`has_ballistic` (інше поле,
+на практиці завжди порожнє — див. BRD, «Відкрите питання»).
 
 **З 2026-09-17 результат `is_heavy_night` більше НЕ вирішує, чи
 надсилати прев'ю** (інцидент — масований обстріл не пробив пороги,

@@ -133,6 +133,7 @@ async def poll_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
             external_id=record.external_id,
             location_uid=record.location_uid,
             raw_alert_type=record.raw_alert_type,
+            alert_level=record.alert_level,
             threat_types=list(record.threat_types),
             started_at=to_canonical_utc_iso(record.started_at),
             finished_at=to_canonical_utc_iso(record.finished_at) if record.finished_at else None,

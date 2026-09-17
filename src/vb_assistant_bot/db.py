@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS alerts (
     external_id   TEXT NOT NULL UNIQUE,
     location_uid  TEXT NOT NULL,
     raw_alert_type TEXT,
+    alert_level   TEXT,
     threat_types  TEXT NOT NULL DEFAULT '[]',
     started_at    TEXT NOT NULL,
     finished_at   TEXT,
@@ -93,6 +94,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE preview_state ADD COLUMN triggered INTEGER NOT NULL DEFAULT 0")
     if not _column_exists(conn, "preview_state", "stats_intro"):
         conn.execute("ALTER TABLE preview_state ADD COLUMN stats_intro TEXT NOT NULL DEFAULT ''")
+    if not _column_exists(conn, "alerts", "alert_level"):
+        conn.execute("ALTER TABLE alerts ADD COLUMN alert_level TEXT")
     conn.commit()
     return conn
 
@@ -106,6 +109,7 @@ def upsert_alert(
     external_id: str,
     location_uid: str,
     raw_alert_type: str | None,
+    alert_level: str | None,
     threat_types: list[str],
     started_at: str,
     finished_at: str | None,
@@ -114,11 +118,12 @@ def upsert_alert(
     conn.execute(
         """
         INSERT INTO alerts
-            (external_id, location_uid, raw_alert_type, threat_types,
+            (external_id, location_uid, raw_alert_type, alert_level, threat_types,
              started_at, finished_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (external_id) DO UPDATE SET
             raw_alert_type = excluded.raw_alert_type,
+            alert_level    = excluded.alert_level,
             threat_types   = excluded.threat_types,
             started_at     = excluded.started_at,
             finished_at    = excluded.finished_at,
@@ -128,6 +133,7 @@ def upsert_alert(
             external_id,
             location_uid,
             raw_alert_type,
+            alert_level,
             json.dumps(threat_types),
             started_at,
             finished_at,

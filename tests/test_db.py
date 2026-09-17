@@ -34,6 +34,7 @@ def test_init_db_migrates_legacy_schema_without_new_columns(tmp_path):
         external_id="e1",
         location_uid="31",
         raw_alert_type="air_raid",
+        alert_level="yellow",
         threat_types=["drones"],
         started_at="2026-09-18T02:00:00+00:00",
         finished_at=None,
@@ -41,6 +42,7 @@ def test_init_db_migrates_legacy_schema_without_new_columns(tmp_path):
     )
     row = conn.execute("SELECT * FROM alerts WHERE external_id = 'e1'").fetchone()
     assert json.loads(row["threat_types"]) == ["drones"]
+    assert row["alert_level"] == "yellow"
 
 
 def test_upsert_alert_inserts_and_updates(conn):
@@ -49,6 +51,7 @@ def test_upsert_alert_inserts_and_updates(conn):
         external_id="ext-1",
         location_uid="31",
         raw_alert_type="air_raid",
+        alert_level=None,
         threat_types=[],
         started_at="2026-09-03T20:00:00+00:00",
         finished_at=None,
@@ -65,6 +68,7 @@ def test_upsert_alert_inserts_and_updates(conn):
         external_id="ext-1",
         location_uid="31",
         raw_alert_type="air_raid",
+        alert_level="red",
         threat_types=["drones"],
         started_at="2026-09-03T20:00:00+00:00",
         finished_at="2026-09-03T21:00:00+00:00",
@@ -76,6 +80,7 @@ def test_upsert_alert_inserts_and_updates(conn):
     assert len(rows) == 1
     assert rows[0]["finished_at"] == "2026-09-03T21:00:00+00:00"
     assert json.loads(rows[0]["threat_types"]) == ["drones"]
+    assert rows[0]["alert_level"] == "red"
 
 
 def test_alerts_overlapping_excludes_outside_window(conn):
@@ -84,6 +89,7 @@ def test_alerts_overlapping_excludes_outside_window(conn):
         external_id="ext-2",
         location_uid="31",
         raw_alert_type="air_raid",
+        alert_level=None,
         threat_types=[],
         started_at="2026-09-01T10:00:00+00:00",
         finished_at="2026-09-01T10:30:00+00:00",
@@ -101,6 +107,7 @@ def test_alerts_overlapping_filters_by_location(conn):
         external_id="ext-3",
         location_uid="30",
         raw_alert_type="air_raid",
+        alert_level=None,
         threat_types=[],
         started_at="2026-09-03T20:00:00+00:00",
         finished_at="2026-09-03T21:00:00+00:00",

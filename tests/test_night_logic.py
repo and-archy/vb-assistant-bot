@@ -7,12 +7,13 @@ _MORNING = date(2026, 1, 15)  # Kyiv EET (UTC+2) — без DST-плутанин
 _TZ = "Europe/Kyiv"
 
 
-def _add_alert(conn, ext_id, start_utc, end_utc, threat_types=None):
+def _add_alert(conn, ext_id, start_utc, end_utc, threat_types=None, alert_level=None):
     db.upsert_alert(
         conn,
         external_id=ext_id,
         location_uid="31",
         raw_alert_type="air_raid",
+        alert_level=alert_level,
         threat_types=threat_types or [],
         started_at=start_utc,
         finished_at=end_utc,
@@ -107,3 +108,30 @@ def test_ongoing_alert_is_clipped_to_now(conn, thresholds):
     )
     assert stats.count == 1
     assert stats.longest.duration.total_seconds() == 30 * 60
+
+
+def test_missile_and_drone_breakdown_by_alert_level(conn, thresholds):
+    _add_alert(
+        conn, "e1", "2026-01-14T21:00:00+00:00", "2026-01-14T22:00:00+00:00", alert_level="red"
+    )
+    _add_alert(
+        conn,
+        "e2",
+        "2026-01-14T23:00:00+00:00",
+        "2026-01-15T00:30:00+00:00",
+        alert_level="yellow",
+    )
+    stats = _stats(conn, thresholds)
+
+    assert len(stats.missile_alerts) == 1
+    assert stats.missile_duration.total_seconds() == 3600
+    assert len(stats.drone_alerts) == 1
+    assert stats.drone_duration.total_seconds() == 5400
+
+
+def test_breakdown_empty_when_alert_level_missing(conn, thresholds):
+    _add_alert(conn, "e1", "2026-01-14T21:00:00+00:00", "2026-01-14T22:00:00+00:00")
+    stats = _stats(conn, thresholds)
+
+    assert stats.missile_alerts == ()
+    assert stats.drone_alerts == ()

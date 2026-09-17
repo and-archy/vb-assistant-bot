@@ -22,6 +22,7 @@ def test_fetch_region_history_parses_list_payload():
             "id": 123,
             "location_uid": "31",
             "alert_type": "air_raid",
+            "alert_level": "red",
             "started_at": "2026-01-14T20:00:00.000Z",
             "finished_at": "2026-01-14T21:00:00.000Z",
             "updated_at": "2026-01-14T21:00:00.000Z",
@@ -35,6 +36,7 @@ def test_fetch_region_history_parses_list_payload():
     assert records[0].external_id == "123"
     assert records[0].location_uid == "31"
     assert records[0].raw_alert_type == "air_raid"
+    assert records[0].alert_level == "red"
     assert records[0].finished_at == "2026-01-14T21:00:00.000Z"
     assert records[0].threat_types == ()
 
