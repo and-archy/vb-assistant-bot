@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS preview_state (
     variant_id    TEXT NOT NULL,
     message_text  TEXT NOT NULL,
     stats_json    TEXT NOT NULL,
+    stats_intro   TEXT NOT NULL DEFAULT '',
     triggered     INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL,
     resolved_at   TEXT,
@@ -90,6 +91,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE alerts ADD COLUMN threat_types TEXT NOT NULL DEFAULT '[]'")
     if not _column_exists(conn, "preview_state", "triggered"):
         conn.execute("ALTER TABLE preview_state ADD COLUMN triggered INTEGER NOT NULL DEFAULT 0")
+    if not _column_exists(conn, "preview_state", "stats_intro"):
+        conn.execute("ALTER TABLE preview_state ADD COLUMN stats_intro TEXT NOT NULL DEFAULT ''")
     conn.commit()
     return conn
 
@@ -226,6 +229,7 @@ def upsert_preview(
     variant_id: str,
     message_text: str,
     stats_json: str,
+    stats_intro: str,
     triggered: bool,
     created_at: str,
 ) -> None:
@@ -233,8 +237,9 @@ def upsert_preview(
         """
         INSERT INTO preview_state
             (morning_date, status, day_type, variant_set, variant_id,
-             message_text, stats_json, triggered, created_at, resolved_at, resolved_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+             message_text, stats_json, stats_intro, triggered, created_at,
+             resolved_at, resolved_by)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
         ON CONFLICT (morning_date) DO UPDATE SET
             status = excluded.status,
             day_type = excluded.day_type,
@@ -242,6 +247,7 @@ def upsert_preview(
             variant_id = excluded.variant_id,
             message_text = excluded.message_text,
             stats_json = excluded.stats_json,
+            stats_intro = excluded.stats_intro,
             triggered = excluded.triggered,
             created_at = excluded.created_at,
             resolved_at = NULL,
@@ -255,6 +261,7 @@ def upsert_preview(
             variant_id,
             message_text,
             stats_json,
+            stats_intro,
             int(triggered),
             created_at,
         ),
@@ -293,7 +300,7 @@ def resolve_preview(
     morning_date: str,
     status: str,
     resolved_by: int | None,
-    resolved_at: str,
+    resolved_at: str | None,
 ) -> None:
     conn.execute(
         """

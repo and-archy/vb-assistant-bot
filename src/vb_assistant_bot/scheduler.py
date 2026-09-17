@@ -23,6 +23,11 @@ _DEFAULT_SET_WEEKDAY = "A"
 _DEFAULT_SET_WEEKEND = "V"
 _CALM_SET = "B"
 
+_PENDING_ACTIONS = frozenset({"send", "more", "calm", "skip"})
+_QUEUED_ACTIONS = frozenset({"cancel"})
+
+_EMPTY_KEYBOARD = InlineKeyboardMarkup([])
+
 
 @dataclass(frozen=True)
 class PreviewResult:
@@ -39,7 +44,7 @@ def determine_day_type(conn, morning_date: date) -> str:
     return "weekend" if morning_date.weekday() >= 5 else "workday"
 
 
-def _preview_keyboard(morning_date: str) -> InlineKeyboardMarkup:
+def _pending_keyboard(morning_date: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("Надіслати", callback_data=f"prev:{morning_date}:send")],
@@ -54,6 +59,48 @@ def _preview_keyboard(morning_date: str) -> InlineKeyboardMarkup:
             ],
         ]
     )
+
+
+def _queued_keyboard(morning_date: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Скасувати", callback_data=f"prev:{morning_date}:cancel")]]
+    )
+
+
+def _pending_body(preview) -> str:
+    return f"{preview['stats_intro']}\n\nГотовий текст:\n{preview['message_text']}"
+
+
+def _queued_body(preview) -> str:
+    return (
+        f"{preview['stats_intro']}\n\n"
+        f"📤 Заплановано до публікації о {_time_label(preview)}:\n{preview['message_text']}"
+    )
+
+
+def _skipped_body(preview) -> str:
+    return f"{preview['stats_intro']}\n\n⏭ Пропущено — нічого не буде опубліковано в General."
+
+
+def _published_body(preview) -> str:
+    return f"{preview['stats_intro']}\n\n✅ Опубліковано в General:\n{preview['message_text']}"
+
+
+def _time_label(preview) -> str:  # noqa: ARG001 — залишає гачок для конфігурованого часу пізніше
+    return "8:00"
+
+
+def _view_for(preview, morning_key: str) -> tuple[str, InlineKeyboardMarkup]:
+    status = preview["status"]
+    if status == "pending":
+        return _pending_body(preview), _pending_keyboard(morning_key)
+    if status == "queued":
+        return _queued_body(preview), _queued_keyboard(morning_key)
+    if status == "skipped":
+        return _skipped_body(preview), _EMPTY_KEYBOARD
+    if status in ("published", "auto_sent"):
+        return _published_body(preview), _EMPTY_KEYBOARD
+    return preview["message_text"], _EMPTY_KEYBOARD
 
 
 def register(application: Application, config: Config, thresholds: Thresholds) -> None:
@@ -99,14 +146,12 @@ async def generate_and_send_preview(
     """Формує й шле прев'ю в особисті всім адмінам — БЕЗУМОВНО (з 2026-09-17,
     після інциденту з мовчазним провалом: масований обстріл не пробив
     пороги тригера, і бот нічого не надіслав). Тригер (`is_heavy_night`)
-    тепер лише рекомендаційний рядок у тексті — публікацію в групу
-    все одно вирішує людина (ТЗ п.4), а `job_autopublish` враховує
-    `triggered` окремо (безлюдна автопублікація має сенс лише коли
-    алгоритм і так рекомендував).
+    лишається рекомендаційним рядком у тексті й умовою для безлюдної
+    гілки `job_autopublish`, але не гейтить сам факт надсилання прев'ю.
 
     force=False (щоденна джоба) — якщо на сьогодні прев'ю вже
-    оброблено (sent/skipped/auto_sent), не дублює. force=True
-    (`/support`) — завжди перегенеровує, ігноруючи попереднє рішення."""
+    оброблено (не `pending`), не дублює. force=True (`/support`) —
+    завжди перегенеровує, ігноруючи попереднє рішення."""
     conn = context.bot_data["conn"]
     config: Config = context.bot_data["config"]
     texts: Texts = context.bot_data["texts"]
@@ -145,13 +190,13 @@ async def generate_and_send_preview(
         variant_id=variant.id,
         message_text=message_text,
         stats_json=json.dumps({"count": stats.count}),
+        stats_intro=format_stats_summary(stats, triggered),
         triggered=triggered,
         created_at=datetime.now(UTC).isoformat(),
     )
 
-    intro = format_stats_summary(stats, triggered)
-    body = f"{intro}\n\nГотовий текст:\n{message_text}"
-    keyboard = _preview_keyboard(morning_key)
+    preview = db.get_preview(conn, morning_key)
+    body, keyboard = _view_for(preview, morning_key)
     sent_to = 0
     for admin_id in config.admin_user_ids:
         try:
@@ -184,18 +229,45 @@ async def job_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """08:00. Дві незалежні гілки:
+
+    1. `status == "queued"` — адмін уже натиснув «Надіслати» (у будь-який
+       час, незалежно від вердикту алгоритму) — публікуємо те, що він
+       обрав, саме зараз, не раніше (ТЗ: дає час скасувати/змінити текст
+       до 8:00).
+    2. `status == "pending"` і `triggered` — ніхто не відреагував на важку
+       ніч: за замовчуванням лише нагадування (перший місяць, ТЗ п.13),
+       з `AUTO_PUBLISH_ENABLED=true` — бот публікує сам.
+
+    Спокійна ніч без реакції (`pending`, не `triggered`) — тиша, це
+    очікуваний результат, не збій."""
     conn = context.bot_data["conn"]
     config: Config = context.bot_data["config"]
     tz = ZoneInfo(config.timezone)
     morning_key = datetime.now(tz).date().isoformat()
 
     preview = db.get_preview(conn, morning_key)
-    if preview is None or preview["status"] != "pending":
+    if preview is None:
         return
-    if not preview["triggered"]:
-        # Алгоритм не вважав ніч важкою — без реакції адміна це і є
-        # правильний результат (ТЗ п.4: тиша по спокійній ночі), нагадувати
-        # чи публікувати самостійно нема сенсу.
+
+    if preview["status"] == "queued":
+        now = datetime.now(UTC).isoformat()
+        await _publish(context, preview["message_text"], morning_key)
+        db.resolve_preview(conn, morning_key, "published", preview["resolved_by"], now)
+        db.add_send_log(
+            conn,
+            morning_date=morning_key,
+            variant_set=preview["variant_set"],
+            variant_id=preview["variant_id"],
+            mode="manual",
+            sent_by=preview["resolved_by"],
+            sent_at=now,
+            group_message_id=None,
+        )
+        await _broadcast_current_view(context, conn, morning_key)
+        return
+
+    if preview["status"] != "pending" or not preview["triggered"]:
         return
 
     if not config.auto_publish_enabled:
@@ -211,8 +283,9 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.error("Не вдалося надіслати нагадування адміну %s: %s", admin_id, exc)
         return
 
+    now = datetime.now(UTC).isoformat()
     await _publish(context, preview["message_text"], morning_key)
-    db.resolve_preview(conn, morning_key, "auto_sent", None, datetime.now(UTC).isoformat())
+    db.resolve_preview(conn, morning_key, "auto_sent", None, now)
     db.add_send_log(
         conn,
         morning_date=morning_key,
@@ -220,10 +293,10 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
         variant_id=preview["variant_id"],
         mode="auto",
         sent_by=None,
-        sent_at=datetime.now(UTC).isoformat(),
+        sent_at=now,
         group_message_id=None,
     )
-    await _clear_preview_messages(context, conn, morning_key)
+    await _broadcast_current_view(context, conn, morning_key)
 
 
 async def _publish(context: ContextTypes.DEFAULT_TYPE, text: str, morning_key: str) -> None:
@@ -232,16 +305,26 @@ async def _publish(context: ContextTypes.DEFAULT_TYPE, text: str, morning_key: s
     logger.info("Опубліковано ранкове повідомлення в General (%s)", morning_key)
 
 
-async def _clear_preview_messages(
+async def _broadcast_current_view(
     context: ContextTypes.DEFAULT_TYPE, conn, morning_key: str
 ) -> None:
+    """Оновлює вигляд прев'ю в ОСОБИСТИХ УСІХ адмінів під поточний стан
+    (ТЗ: 'щоб це бачив кожен адміністратор') — не лише в того, хто щойно
+    натиснув кнопку."""
+    preview = db.get_preview(conn, morning_key)
+    if preview is None:
+        return
+    body, keyboard = _view_for(preview, morning_key)
     for row in db.preview_messages(conn, morning_key):
         try:
-            await context.bot.edit_message_reply_markup(
-                chat_id=row["chat_id"], message_id=row["message_id"], reply_markup=None
+            await context.bot.edit_message_text(
+                chat_id=row["chat_id"],
+                message_id=row["message_id"],
+                text=body,
+                reply_markup=keyboard,
             )
         except TelegramError as exc:
-            logger.error("Не вдалося прибрати кнопки прев'ю chat_id=%s: %s", row["chat_id"], exc)
+            logger.error("Не вдалося оновити прев'ю chat_id=%s: %s", row["chat_id"], exc)
 
 
 async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -260,39 +343,41 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if preview is None:
         await query.answer("Прев'ю більше не активне")
         return
-    if preview["status"] != "pending":
+
+    status = preview["status"]
+    valid = (status == "pending" and action in _PENDING_ACTIONS) or (
+        status == "queued" and action in _QUEUED_ACTIONS
+    )
+    if not valid:
         await query.answer("Вже оброблено")
+        body, keyboard = _view_for(preview, morning_key)
         try:
-            await query.edit_message_reply_markup(reply_markup=None)
+            await query.edit_message_text(body, reply_markup=keyboard)
         except TelegramError:
             pass
         return
 
+    now = datetime.now(UTC).isoformat()
+
     if action == "send":
-        await query.answer()
-        await _publish(context, preview["message_text"], morning_key)
-        db.resolve_preview(conn, morning_key, "sent", user.id, datetime.now(UTC).isoformat())
-        db.add_send_log(
-            conn,
-            morning_date=morning_key,
-            variant_set=preview["variant_set"],
-            variant_id=preview["variant_id"],
-            mode="manual",
-            sent_by=user.id,
-            sent_at=datetime.now(UTC).isoformat(),
-            group_message_id=None,
-        )
-        await _clear_preview_messages(context, conn, morning_key)
+        db.resolve_preview(conn, morning_key, "queued", user.id, now)
+        await query.answer("Заплановано до публікації о 8:00")
+        await _broadcast_current_view(context, conn, morning_key)
+        return
+
+    if action == "cancel":
+        db.resolve_preview(conn, morning_key, "pending", None, None)
+        await query.answer("Скасовано — оберіть варіант і надішліть знову")
+        await _broadcast_current_view(context, conn, morning_key)
         return
 
     if action == "skip":
+        db.resolve_preview(conn, morning_key, "skipped", user.id, now)
         await query.answer("Пропущено")
-        db.resolve_preview(conn, morning_key, "skipped", user.id, datetime.now(UTC).isoformat())
-        await _clear_preview_messages(context, conn, morning_key)
+        await _broadcast_current_view(context, conn, morning_key)
         return
 
     if action in ("more", "calm"):
-        await query.answer()
         set_name = _CALM_SET if action == "calm" else preview["variant_set"]
         variant = deck.draw_next(conn, set_name, texts.sets[set_name])
         include_arrangements = preview["day_type"] == "workday"
@@ -304,12 +389,8 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             variant_id=variant.id,
             message_text=message_text,
         )
-        stats_intro = query.message.text.split("\n\n")[0] if query.message.text else ""
-        body = f"{stats_intro}\n\nГотовий текст:\n{message_text}"
-        try:
-            await query.edit_message_text(body, reply_markup=_preview_keyboard(morning_key))
-        except TelegramError as exc:
-            logger.error("Не вдалося оновити прев'ю: %s", exc)
+        await query.answer()
+        await _broadcast_current_view(context, conn, morning_key)
         return
 
     logger.warning("Невідома дія прев'ю: %s", query.data)

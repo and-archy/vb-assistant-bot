@@ -116,8 +116,11 @@ def determine_day_type(conn, morning_date: date) -> str: ...       # "workday"/"
 async def poll_alerts(context) -> None: ...
 async def generate_and_send_preview(context, *, force: bool) -> PreviewResult: ...  # шле завжди
 async def job_preview(context) -> None: ...
-async def job_autopublish(context) -> None: ...   # публікує/нагадує лише якщо preview.triggered
+async def job_autopublish(context) -> None: ...
+# 08:00: status=="queued" -> публікує незалежно від triggered (2026-09-18+);
+# інакше лише коли status=="pending" AND triggered -> нагадування/автопублікація.
 async def on_preview_action(update, context) -> None: ...          # callback_data "prev:<date>:<action>"
+# action залежить від status: pending -> {send, more, calm, skip}; queued -> {cancel}
 ```
 
 ```python
@@ -130,10 +133,10 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE) -> None: ...
 ## Callback data формат
 
 `prev:<morning_date ISO>:<action>`, `<action>` ∈
-`{send, more, calm, skip}`. Немає окремого підтвердження перед `send`
-(на відміну від видалення в `tg-apteka`) — навмисно, бо кожна секунда
-затримки о 7 ранку небайдужа, і кнопка вже стоїть після явного
-прев'ю з повним текстом.
+`{send, more, calm, skip, cancel}` — дозволені залежно від поточного
+`status` (див. scheduler.py вище). `send` з 2026-09-18 не публікує
+одразу — переводить `pending → queued`, фактична публікація лише на
+`job_autopublish` о 08:00 (вікно для `cancel`/зміни тексту).
 
 ## Команди
 

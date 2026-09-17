@@ -141,6 +141,7 @@ def test_preview_lifecycle(conn):
         variant_id="A1",
         message_text="текст",
         stats_json="{}",
+        stats_intro="Статистика ночі: тривог не зафіксовано.",
         triggered=True,
         created_at="2026-09-04T07:01:00+00:00",
     )
@@ -177,6 +178,7 @@ def test_upsert_preview_resets_resolution_and_messages(conn):
         variant_id="A1",
         message_text="текст",
         stats_json="{}",
+        stats_intro="Статистика ночі: тривог не зафіксовано.",
         triggered=True,
         created_at="2026-09-04T07:01:00+00:00",
     )
@@ -193,6 +195,7 @@ def test_upsert_preview_resets_resolution_and_messages(conn):
         variant_id="A2",
         message_text="новий текст",
         stats_json="{}",
+        stats_intro="Статистика ночі: тривог не зафіксовано.",
         triggered=True,
         created_at="2026-09-04T09:00:00+00:00",
     )

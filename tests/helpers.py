@@ -37,4 +37,5 @@ def make_context(conn, config, texts=None, thresholds=None, args=None):
     context.bot = MagicMock()
     context.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
     context.bot.edit_message_reply_markup = AsyncMock()
+    context.bot.edit_message_text = AsyncMock()
     return context

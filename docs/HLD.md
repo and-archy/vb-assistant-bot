@@ -101,11 +101,13 @@ CREATE TABLE deck_state (set_name TEXT PRIMARY KEY, remaining_json TEXT);
 CREATE TABLE deck_history (id, set_name, variant_id, used_at);
 
 CREATE TABLE preview_state (
-    morning_date TEXT PRIMARY KEY, status TEXT,   -- pending/sent/skipped/auto_sent
+    morning_date TEXT PRIMARY KEY,
+    status TEXT,   -- pending/queued/skipped/published/auto_sent (2026-09-18+)
     day_type TEXT, variant_set TEXT, variant_id TEXT,
     message_text TEXT, stats_json TEXT,
+    stats_intro TEXT DEFAULT '',   -- готовий текст статистики+вердикту (не парсити з чату)
     triggered INTEGER DEFAULT 0,   -- вердикт алгоритму (2026-09-17+, лише рекомендаційний)
-    created_at TEXT, resolved_at TEXT, resolved_by INTEGER
+    created_at TEXT, resolved_at TEXT, resolved_by INTEGER  -- resolved_by = хто натиснув "Надіслати"
 );
 CREATE TABLE preview_messages (morning_date, chat_id, message_id);  -- копія в кожного адміна
 
@@ -153,7 +155,7 @@ CREATE TABLE send_log (
 
 `generate_and_send_preview(context, force) -> PreviewResult` — спільна
 точка входу для 07:01-джоби і `/support`. **Шле прев'ю безумовно**
-(2026-09-17+, трigger більше не гейтить відправку — див. [3]). Єдине,
+(2026-09-17+, тригер більше не гейтить відправку — див. [3]). Єдине,
 що робить `force`:
 
 - `force=False` (щоденна джоба): якщо на сьогодні вже є рішення
@@ -168,24 +170,54 @@ CREATE TABLE send_log (
 (скільки адмінів реально отримали DM, вердикт тригера) — і `/support`,
 і джоба логують/показують цей результат, ніколи не мовчать.
 
-`on_preview_action` — гейт на `ADMIN_USER_IDS`, читає
-`preview_state.status`: якщо не `pending` — «Вже оброблено» і чистить
-клавіатуру. `send`/`skip` — резолвлять і чистять усі копії прев'ю у
-всіх адмінів. `more`/`calm` — тягнуть новий варіант (той самий
-набір / примусово Б), оновлюють `preview_state` і **лише повідомлення
-адміна, що натиснув** (інші копії лишаються застарілими — відоме
-обмеження v1 для команди з 2 адмінами).
+### Стейт-машина `preview_state.status` (2026-09-18+)
 
-## [7] Автопублікація — scheduler.job_autopublish
+```
+pending ──send──▶ queued ──cancel──▶ pending
+   │                  │
+   └──skip──▶ skipped │
+                       └── job_autopublish (08:00) ──▶ published
+pending (triggered=1, ніхто не натиснув) ── job_autopublish ──▶ auto_sent (якщо AUTO_PUBLISH_ENABLED)
+```
 
-08:00: якщо `preview_state.status != "pending"` — нічого. Якщо
-**`triggered` не встановлено** (алгоритм не рекомендував) — теж
-нічого: спокійна ніч без реакції адміна — очікуваний результат, не
-збій (жодного нагадування, жодної публікації). Лише коли `triggered`
-істинне: `AUTO_PUBLISH_ENABLED=true` — публікує `message_text` у
-`GROUP_CHAT_ID`, резолвить `auto_sent`; вимкнено (дефолт першого
-місяця, ТЗ п.13) — лише нагадує адмінам, нічого не публікує і не
-змінює статус (щоб кнопки лишались активними).
+**Вимога 2026-09-18:** «Надіслати» більше не публікує миттєво в групу —
+лише переводить `pending → queued` (зберігає `resolved_by` = хто
+натиснув). Фактична публікація в `GROUP_CHAT_ID` відбувається лише на
+`job_autopublish` о 08:00, незалежно від `triggered` — це дає вікно
+для «Скасувати» (`queued → pending`, `resolved_by` скидається),
+вибору іншого тексту/тону і повторного «Надіслати» до 8:00.
+
+`on_preview_action` — гейт на `ADMIN_USER_IDS`, дозволені дії залежно
+від `status`: `pending` → `{send, more, calm, skip}`; `queued` → `{cancel}`.
+Будь-яка інша комбінація (застаріла кнопка, вже вирішено) → «Вже
+оброблено» і поточний справжній стан підвантажується в повідомлення,
+що клікнули.
+
+**`_broadcast_current_view`** — після КОЖНОЇ зміни стану (send/cancel/
+skip/more/calm) переписує (`edit_message_text`) повідомлення в
+особистих **усіх** адмінів під нову спільну правду з `preview_state`
+(текст+кнопки залежно від `status`) — не лише те, що клікнули (ТЗ:
+«щоб це бачив кожен адміністратор»; заразом усуває стару відому
+ваду, коли «Інший варіант»/«Стриманий тон» оновлював лише клікнуте
+повідомлення).
+
+## [7] Автопублікація/диспетчеризація — scheduler.job_autopublish
+
+08:00, дві незалежні гілки:
+
+1. **`status == "queued"`** (адмін уже натиснув «Надіслати» будь-коли
+   до 8:00, незалежно від `triggered`) — публікує `message_text` у
+   `GROUP_CHAT_ID` просто зараз, резолвить `published`, `send_log.mode
+   = "manual"`, `sent_by` = той, хто натиснув. Це основний шлях з
+   2026-09-18.
+2. **`status == "pending"` і `triggered`** (ніхто не відреагував на
+   важку ніч) — безлюдний резервний шлях: `AUTO_PUBLISH_ENABLED=false`
+   (дефолт першого місяця, ТЗ п.13) — лише нагадує адмінам; `=true` —
+   публікує сам, резолвить `auto_sent`, `send_log.mode = "auto"`.
+
+`status == "pending"` і НЕ `triggered` (спокійна ніч, ніхто не
+відповів) — тиша, очікуваний результат, не збій. `status == "skipped"`
+— теж тиша (явне рішення адміна).
 
 ## [8] Відмовостійкість — /support і глобальний error handler
 

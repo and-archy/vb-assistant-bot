@@ -53,7 +53,7 @@ def test_generate_and_send_preview_skips_if_already_resolved_today(conn, config,
     context = make_context(conn, config, texts=texts, thresholds=thresholds)
     asyncio.run(scheduler.generate_and_send_preview(context, force=True))
     morning_key = date.today().isoformat()
-    db.resolve_preview(conn, morning_key, "sent", 111, "2026-01-01T00:00:00+00:00")
+    db.resolve_preview(conn, morning_key, "skipped", 111, "2026-01-01T00:00:00+00:00")
     context.bot.send_message.reset_mock()
 
     result = asyncio.run(scheduler.generate_and_send_preview(context, force=False))
@@ -68,7 +68,7 @@ def test_generate_and_send_preview_force_regenerates_even_if_resolved(
     context = make_context(conn, config, texts=texts, thresholds=thresholds)
     asyncio.run(scheduler.generate_and_send_preview(context, force=True))
     morning_key = date.today().isoformat()
-    db.resolve_preview(conn, morning_key, "sent", 111, "2026-01-01T00:00:00+00:00")
+    db.resolve_preview(conn, morning_key, "skipped", 111, "2026-01-01T00:00:00+00:00")
     context.bot.send_message.reset_mock()
 
     result = asyncio.run(scheduler.generate_and_send_preview(context, force=True))
@@ -77,7 +77,9 @@ def test_generate_and_send_preview_force_regenerates_even_if_resolved(
     assert db.get_preview(conn, morning_key)["status"] == "pending"
 
 
-def test_on_preview_action_send_publishes_and_resolves(conn, config, texts, thresholds):
+def test_on_preview_action_send_queues_without_publishing(conn, config, texts, thresholds):
+    """'Надіслати' більше не публікує миттєво — лише планує на 8:00, щоб
+    лишити вікно для скасування/зміни тексту (вимога 2026-09-18)."""
     context = make_context(conn, config, texts=texts, thresholds=thresholds)
     asyncio.run(scheduler.generate_and_send_preview(context, force=True))
     morning_key = date.today().isoformat()
@@ -87,13 +89,64 @@ def test_on_preview_action_send_publishes_and_resolves(conn, config, texts, thre
     asyncio.run(scheduler.on_preview_action(update, context))
 
     preview = db.get_preview(conn, morning_key)
-    assert preview["status"] == "sent"
+    assert preview["status"] == "queued"
     assert preview["resolved_by"] == 111
-    context.bot.send_message.assert_awaited_once()
-    _, kwargs = context.bot.send_message.await_args
-    assert kwargs["chat_id"] == config.group_chat_id
-    row = conn.execute("SELECT * FROM send_log").fetchone()
-    assert row["mode"] == "manual"
+    context.bot.send_message.assert_not_called()  # не публікує в групу негайно
+
+
+def test_on_preview_action_send_broadcasts_queued_view_to_all_admins(
+    conn, config, texts, thresholds
+):
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True))
+    morning_key = date.today().isoformat()
+
+    update = make_update(user_id=111, callback_data=f"prev:{morning_key}:send")
+    asyncio.run(scheduler.on_preview_action(update, context))
+
+    assert context.bot.edit_message_text.await_count == len(config.admin_user_ids)
+    for _, kwargs in context.bot.edit_message_text.await_args_list:
+        assert "Заплановано" in kwargs["text"]
+
+
+def test_on_preview_action_cancel_returns_to_pending(conn, config, texts, thresholds):
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True))
+    morning_key = date.today().isoformat()
+    send_update = make_update(user_id=111, callback_data=f"prev:{morning_key}:send")
+    asyncio.run(scheduler.on_preview_action(send_update, context))
+
+    cancel_update = make_update(user_id=222, callback_data=f"prev:{morning_key}:cancel")
+    asyncio.run(scheduler.on_preview_action(cancel_update, context))
+
+    preview = db.get_preview(conn, morning_key)
+    assert preview["status"] == "pending"
+    assert preview["resolved_by"] is None
+
+
+def test_on_preview_action_cancel_then_resend_requeues(conn, config, texts, thresholds):
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True))
+    morning_key = date.today().isoformat()
+    asyncio.run(
+        scheduler.on_preview_action(
+            make_update(user_id=111, callback_data=f"prev:{morning_key}:send"), context
+        )
+    )
+    asyncio.run(
+        scheduler.on_preview_action(
+            make_update(user_id=111, callback_data=f"prev:{morning_key}:cancel"), context
+        )
+    )
+    asyncio.run(
+        scheduler.on_preview_action(
+            make_update(user_id=222, callback_data=f"prev:{morning_key}:send"), context
+        )
+    )
+
+    preview = db.get_preview(conn, morning_key)
+    assert preview["status"] == "queued"
+    assert preview["resolved_by"] == 222
 
 
 def test_on_preview_action_skip_resolves_without_publishing(conn, config, texts, thresholds):
@@ -121,7 +174,7 @@ def test_on_preview_action_calm_switches_to_set_b(conn, config, texts, threshold
     preview = db.get_preview(conn, morning_key)
     assert preview["variant_set"] == "B"
     assert preview["status"] == "pending"
-    update.callback_query.edit_message_text.assert_awaited_once()
+    assert context.bot.edit_message_text.await_count == len(config.admin_user_ids)
 
 
 def test_on_preview_action_more_draws_another_variant_same_set(conn, config, texts, thresholds):
@@ -157,12 +210,24 @@ def test_on_preview_action_already_resolved_shows_notice(conn, config, texts, th
     context = make_context(conn, config, texts=texts, thresholds=thresholds)
     asyncio.run(scheduler.generate_and_send_preview(context, force=True))
     morning_key = date.today().isoformat()
-    db.resolve_preview(conn, morning_key, "sent", 111, "2026-01-01T00:00:00+00:00")
+    db.resolve_preview(conn, morning_key, "skipped", 111, "2026-01-01T00:00:00+00:00")
 
     update = make_update(user_id=222, callback_data=f"prev:{morning_key}:send")
     asyncio.run(scheduler.on_preview_action(update, context))
 
     update.callback_query.answer.assert_awaited_once_with("Вже оброблено")
+
+
+def test_on_preview_action_cancel_invalid_when_pending(conn, config, texts, thresholds):
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True))
+    morning_key = date.today().isoformat()
+
+    update = make_update(user_id=111, callback_data=f"prev:{morning_key}:cancel")
+    asyncio.run(scheduler.on_preview_action(update, context))
+
+    update.callback_query.answer.assert_awaited_once_with("Вже оброблено")
+    assert db.get_preview(conn, morning_key)["status"] == "pending"
 
 
 def _force_triggered(conn, morning_key: str) -> None:
@@ -171,9 +236,8 @@ def _force_triggered(conn, morning_key: str) -> None:
 
 
 def test_job_autopublish_noop_when_not_triggered(conn, config, texts, thresholds):
-    """Не важка ніч (дефолт без тривог у тестовій БД) — навіть якщо
-    прев'ю pending, о 08:00 не публікує й не нагадує (ТЗ п.4: тиша по
-    спокійній ночі — це правильний результат, не збій)."""
+    """Не важка ніч (дефолт без тривог у тестовій БД) і ніхто не натиснув
+    'Надіслати' — о 8:00 тиша, це правильний результат, не збій."""
     context = make_context(conn, config, texts=texts, thresholds=thresholds)
     asyncio.run(scheduler.generate_and_send_preview(context, force=True))
     context.bot.send_message.reset_mock()
@@ -181,6 +245,33 @@ def test_job_autopublish_noop_when_not_triggered(conn, config, texts, thresholds
     asyncio.run(scheduler.job_autopublish(context))
 
     context.bot.send_message.assert_not_called()
+
+
+def test_job_autopublish_publishes_queued_regardless_of_trigger(conn, config, texts, thresholds):
+    """Головна нова поведінка: адмін натиснув 'Надіслати' на СПОКІЙНУ ніч
+    (алгоритм не тригернув) — о 8:00 все одно публікується."""
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True))
+    morning_key = date.today().isoformat()
+    asyncio.run(
+        scheduler.on_preview_action(
+            make_update(user_id=111, callback_data=f"prev:{morning_key}:send"), context
+        )
+    )
+    assert db.get_preview(conn, morning_key)["triggered"] == 0
+    context.bot.send_message.reset_mock()
+
+    asyncio.run(scheduler.job_autopublish(context))
+
+    context.bot.send_message.assert_awaited_once()
+    _, kwargs = context.bot.send_message.await_args
+    assert kwargs["chat_id"] == config.group_chat_id
+    preview = db.get_preview(conn, morning_key)
+    assert preview["status"] == "published"
+    assert preview["resolved_by"] == 111
+    row = conn.execute("SELECT * FROM send_log").fetchone()
+    assert row["mode"] == "manual"
+    assert row["sent_by"] == 111
 
 
 def test_job_autopublish_sends_reminder_when_disabled(conn, config, texts, thresholds):
