@@ -99,6 +99,15 @@ def _clear_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop(_EDIT_ID_KEY, None)
 
 
+def reset_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Публічна обгортка для `menu.on_button` — перемикання на іншу
+    кнопку меню (не «Скасувати», не «Своє повідомлення») під час
+    незавершеного вводу тексту/часу мало б лишати «привида» стану:
+    наступне звичайне повідомлення від адміна помилково зчитувалось би
+    як текст/час свого повідомлення."""
+    _clear_state(context)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.bot_data["config"]
     if not await ensure_admin(update, config):

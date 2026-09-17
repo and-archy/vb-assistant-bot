@@ -77,6 +77,10 @@ def main() -> None:
     application.add_handler(CommandHandler("cancel", custom.cancel_compose))
     application.add_handler(CallbackQueryHandler(scheduler.on_preview_action, pattern=r"^prev:"))
     application.add_handler(CallbackQueryHandler(custom.on_action, pattern=r"^custom:"))
+    # Кнопки — ПЕРЕД загальним текстовим хендлером: у межах однієї групи
+    # PTB зупиняється на першому хендлері, чий фільтр збігся, тож
+    # натискання кнопки ніколи не потрапляє в custom.on_text.
+    application.add_handler(MessageHandler(filters.Text(menu.BUTTON_LABELS), menu.on_button))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, custom.on_text))
     application.add_error_handler(on_error)
 

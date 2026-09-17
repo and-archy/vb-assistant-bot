@@ -159,7 +159,24 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE) -> None: ...
 | `/cancel` | адміни | скидає незавершений ввід `/custom` (текст/час/редагування) |
 
 Групу General бот не гейтить — жодних `MessageHandler` на текст
-учасників, лише `bot.send_message(GROUP_CHAT_ID, ...)`. Єдиний виняток
-— `MessageHandler(filters.TEXT & ~filters.COMMAND, custom.on_text)`,
-але він теж лише приватні чати і лише коли є активний
-`custom_step` — інакше нічого не робить.
+учасників, лише `bot.send_message(GROUP_CHAT_ID, ...)`. Виняток —
+два `MessageHandler` на приватні чати: спершу `menu.on_button`
+(`filters.Text(BUTTON_LABELS)`, кнопки нижче), тоді `custom.on_text`
+(`filters.TEXT & ~filters.COMMAND`, лише коли є активний
+`custom_step` — інакше нічого не робить).
+
+## Кнопкове меню — handlers/menu.py
+
+```python
+BTN_SUPPORT = "🌅 Прев'ю зараз"      # -> support.support
+BTN_CUSTOM = "📝 Своє повідомлення"   # -> custom.start
+BTN_WEEKEND = "🌴 Вихідний сьогодні"  # -> weekend.mark_weekend, context.args=[]
+BTN_WORKDAY = "💼 Робочий сьогодні"   # -> weekend.mark_workday, context.args=[]
+BTN_CANCEL = "❌ Скасувати"           # -> custom.cancel_compose
+BTN_HELP = "❓ Довідка"               # -> menu.start (повторно)
+
+MAIN_KEYBOARD: ReplyKeyboardMarkup  # надсилається в /start, /help
+```
+
+`on_button` скидає `custom.reset_state` перед диспетчеризацією для
+всіх кнопок, крім `BTN_CUSTOM`/`BTN_CANCEL` (самі керують станом).
