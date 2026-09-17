@@ -71,6 +71,26 @@ CREATE TABLE IF NOT EXISTS send_log (
     sent_at           TEXT NOT NULL,
     group_message_id  INTEGER
 );
+
+-- Довільне повідомлення адміна на власно обрану дату/час (не прив'язане
+-- до ранкового циклу preview_state) — /custom.
+CREATE TABLE IF NOT EXISTS custom_messages (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    text              TEXT NOT NULL,
+    scheduled_at      TEXT NOT NULL,   -- канонічний UTC ISO8601
+    status            TEXT NOT NULL,   -- scheduled/cancelled/sent
+    created_by        INTEGER NOT NULL,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL,
+    sent_at           TEXT
+);
+
+CREATE TABLE IF NOT EXISTS custom_message_previews (
+    custom_message_id INTEGER NOT NULL REFERENCES custom_messages (id) ON DELETE CASCADE,
+    chat_id           INTEGER NOT NULL,
+    message_id        INTEGER NOT NULL,
+    PRIMARY KEY (custom_message_id, chat_id)
+);
 """
 
 
@@ -361,3 +381,100 @@ def add_send_log(
         (morning_date, variant_set, variant_id, mode, sent_by, sent_at, group_message_id),
     )
     conn.commit()
+
+
+# --- custom messages ------------------------------------------------------------
+
+
+def create_custom_message(
+    conn: sqlite3.Connection,
+    *,
+    text: str,
+    scheduled_at: str,
+    created_by: int,
+    created_at: str,
+) -> int:
+    cursor = conn.execute(
+        """
+        INSERT INTO custom_messages
+            (text, scheduled_at, status, created_by, created_at, updated_at)
+        VALUES (?, ?, 'scheduled', ?, ?, ?)
+        """,
+        (text, scheduled_at, created_by, created_at, created_at),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_custom_message(conn: sqlite3.Connection, custom_message_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM custom_messages WHERE id = ?", (custom_message_id,)
+    ).fetchone()
+
+
+def update_custom_message_text(
+    conn: sqlite3.Connection, custom_message_id: int, text: str, updated_at: str
+) -> None:
+    conn.execute(
+        "UPDATE custom_messages SET text = ?, updated_at = ? WHERE id = ?",
+        (text, updated_at, custom_message_id),
+    )
+    conn.commit()
+
+
+def update_custom_message_time(
+    conn: sqlite3.Connection, custom_message_id: int, scheduled_at: str, updated_at: str
+) -> None:
+    conn.execute(
+        "UPDATE custom_messages SET scheduled_at = ?, updated_at = ? WHERE id = ?",
+        (scheduled_at, updated_at, custom_message_id),
+    )
+    conn.commit()
+
+
+def set_custom_message_status(
+    conn: sqlite3.Connection, custom_message_id: int, status: str, updated_at: str
+) -> None:
+    conn.execute(
+        "UPDATE custom_messages SET status = ?, updated_at = ? WHERE id = ?",
+        (status, updated_at, custom_message_id),
+    )
+    conn.commit()
+
+
+def mark_custom_message_sent(
+    conn: sqlite3.Connection, custom_message_id: int, sent_at: str
+) -> None:
+    conn.execute(
+        "UPDATE custom_messages SET status = 'sent', sent_at = ?, updated_at = ? WHERE id = ?",
+        (sent_at, sent_at, custom_message_id),
+    )
+    conn.commit()
+
+
+def due_custom_messages(conn: sqlite3.Connection, now_utc_iso: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM custom_messages WHERE status = 'scheduled' AND scheduled_at <= ?",
+        (now_utc_iso,),
+    ).fetchall()
+
+
+def add_custom_message_preview(
+    conn: sqlite3.Connection, custom_message_id: int, chat_id: int, message_id: int
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO custom_message_previews (custom_message_id, chat_id, message_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT (custom_message_id, chat_id) DO UPDATE SET message_id = excluded.message_id
+        """,
+        (custom_message_id, chat_id, message_id),
+    )
+    conn.commit()
+
+
+def custom_message_previews(conn: sqlite3.Connection, custom_message_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT chat_id, message_id FROM custom_message_previews WHERE custom_message_id = ?",
+        (custom_message_id,),
+    ).fetchall()

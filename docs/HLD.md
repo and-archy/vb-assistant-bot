@@ -243,3 +243,24 @@ skip/more/calm) переписує (`edit_message_text`) повідомленн�
   помилку в будь-якому хендлері чи джобі й шле всім
   `ADMIN_USER_IDS` `⚠️ Помилка в боті: ...` — друга лінія захисту від
   тиші там, де конкретний хендлер сам не подбав про це.
+
+## [9] Своє повідомлення — handlers/custom.py
+
+Не ConversationHandler (щоб не додавати ще одну абстракцію заради
+двох кроків) — легкий стейт у `context.user_data["custom_step"]`
+(`await_text → await_time`, або `await_edit_text`/`await_edit_time`
+при редагуванні), який читає єдиний глобальний `MessageHandler(filters
+.TEXT & ~filters.COMMAND, custom.on_text)` — ігнорує будь-який текст
+без активного кроку чи поза приватним чатом (`effective_chat.type !=
+"private"`, щоб не реагувати на випадкові повідомлення в General).
+
+`custom_messages` — власна таблиця, незалежна від `preview_state`:
+`status` ∈ `{scheduled, cancelled, sent}`. `job_dispatch` (кожні 60с,
+`scheduler.register`) публікує все, де `scheduled_at <= now` — точність
+до хвилини достатня для довільно обраного адміном часу (на відміну від
+фіксованих 07:01/08:00 ранкового циклу, де `run_daily` доречніший).
+
+`_broadcast` — той самий патерн, що й `scheduler._broadcast_current_view`:
+після кожної зміни (створення/скасування/редагування тексту чи часу)
+переписує вигляд у особистих **усіх** адмінів (`custom_message_previews`
+зберігає `message_id` кожної копії), не лише того, хто діяв.

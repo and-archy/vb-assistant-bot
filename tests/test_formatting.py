@@ -37,7 +37,7 @@ def _alert(start_h, start_m, end_h, end_m, alert_level=None):
 def test_format_stats_summary_no_alerts():
     stats = _make_stats([])
     text = format_stats_summary(stats, triggered=False)
-    assert text.startswith("Статистика ночі: тривог не зафіксовано.")
+    assert text.startswith("📊 Статистика ночі: тривог не зафіксовано.")
 
 
 def test_format_stats_summary_pluralization_and_duration():
@@ -74,11 +74,12 @@ def test_format_stats_summary_missile_and_drone_breakdown():
         ]
     )
     text = format_stats_summary(stats, triggered=True)
-    assert "ракетна загроза — 1 тривога, 1 год" in text
-    assert "дронова загроза — 1 тривога, 30 хв" in text
+    assert "🚀 Ракетна загроза — 1 тривога, 1 год" in text
+    assert "🛸 Дронова загроза — 1 тривога, 30 хв" in text
 
 
 def test_format_stats_summary_no_breakdown_without_alert_level():
     stats = _make_stats([_alert(2, 10, 5, 15)])
     text = format_stats_summary(stats, triggered=True)
-    assert "У т.ч." not in text
+    assert "🚀" not in text
+    assert "🛸" not in text

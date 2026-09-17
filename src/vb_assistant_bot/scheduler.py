@@ -13,9 +13,12 @@ from vb_assistant_bot.alerts_client import AlertsInUaClient
 from vb_assistant_bot.config import Config
 from vb_assistant_bot.content import Texts, Thresholds
 from vb_assistant_bot.formatting import format_stats_summary
+from vb_assistant_bot.handlers import custom as custom_messages
 from vb_assistant_bot.message_builder import build_message
 from vb_assistant_bot.night_logic import compute_night_stats, is_heavy_night
 from vb_assistant_bot.timeutil import to_canonical_utc_iso
+
+_CUSTOM_MESSAGE_POLL_SECONDS = 60
 
 logger = logging.getLogger(__name__)
 
@@ -111,6 +114,9 @@ def register(application: Application, config: Config, thresholds: Thresholds) -
     application.job_queue.run_daily(job_preview, time=thresholds.preview_time.replace(tzinfo=tz))
     application.job_queue.run_daily(
         job_autopublish, time=thresholds.autopublish_time.replace(tzinfo=tz)
+    )
+    application.job_queue.run_repeating(
+        custom_messages.job_dispatch, interval=_CUSTOM_MESSAGE_POLL_SECONDS, first=10
     )
 
 

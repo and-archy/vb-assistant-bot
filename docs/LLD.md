@@ -23,6 +23,7 @@ src/vb_assistant_bot/
         menu.py               # /start /help
         support.py             # /support
         weekend.py              # /markweekend /markworkday
+        custom.py                # /custom /cancel — своє повідомлення на власну дату/час
 ```
 
 ## Контракти
@@ -138,6 +139,14 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE) -> None: ...
 одразу — переводить `pending → queued`, фактична публікація лише на
 `job_autopublish` о 08:00 (вікно для `cancel`/зміни тексту).
 
+## Callback data формат — /custom
+
+`custom:<id>:<action>`, `<action>` ∈ `{cancel, edit_text, edit_time}`.
+Дозволено лише коли `custom_messages.status == "scheduled"`.
+`edit_text`/`edit_time` не міняють нічого одразу — переводять
+`context.user_data["custom_step"]` у `await_edit_text`/`await_edit_time`,
+фактична зміна — наступним текстовим повідомленням від того ж адміна.
+
 ## Команди
 
 | Команда | Доступ | Дія |
@@ -146,6 +155,11 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE) -> None: ...
 | `/support` | адміни | `generate_and_send_preview(force=True)`, завжди відповідає в чат виклику |
 | `/markweekend [дд.мм.рррр]` | адміни | `manual_day_type[day] = "weekend"` |
 | `/markworkday [дд.мм.рррр]` | адміни | `manual_day_type[day] = "workday"` |
+| `/custom` | адміни | старт компоновки свого повідомлення (текст → дата/час) |
+| `/cancel` | адміни | скидає незавершений ввід `/custom` (текст/час/редагування) |
 
 Групу General бот не гейтить — жодних `MessageHandler` на текст
-учасників, лише `bot.send_message(GROUP_CHAT_ID, ...)`.
+учасників, лише `bot.send_message(GROUP_CHAT_ID, ...)`. Єдиний виняток
+— `MessageHandler(filters.TEXT & ~filters.COMMAND, custom.on_text)`,
+але він теж лише приватні чати і лише коли є активний
+`custom_step` — інакше нічого не робить.

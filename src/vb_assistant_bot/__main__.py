@@ -4,13 +4,20 @@ import os
 
 from telegram import Update
 from telegram.error import TelegramError
-from telegram.ext import ApplicationBuilder, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from vb_assistant_bot import db, scheduler
 from vb_assistant_bot.alerts_client import AlertsInUaClient
 from vb_assistant_bot.config import Config, load_config
 from vb_assistant_bot.content import load_texts, load_thresholds
-from vb_assistant_bot.handlers import menu, support, weekend
+from vb_assistant_bot.handlers import custom, menu, support, weekend
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +73,11 @@ def main() -> None:
     application.add_handler(CommandHandler("support", support.support))
     application.add_handler(CommandHandler("markweekend", weekend.mark_weekend))
     application.add_handler(CommandHandler("markworkday", weekend.mark_workday))
+    application.add_handler(CommandHandler("custom", custom.start))
+    application.add_handler(CommandHandler("cancel", custom.cancel_compose))
     application.add_handler(CallbackQueryHandler(scheduler.on_preview_action, pattern=r"^prev:"))
+    application.add_handler(CallbackQueryHandler(custom.on_action, pattern=r"^custom:"))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, custom.on_text))
     application.add_error_handler(on_error)
 
     scheduler.register(application, config, thresholds)

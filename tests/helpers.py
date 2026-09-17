@@ -8,9 +8,10 @@ def make_message(text=None):
     return message
 
 
-def make_update(user_id=111, text=None, args=None, callback_data=None):
+def make_update(user_id=111, text=None, args=None, callback_data=None, chat_type="private"):
     update = MagicMock()
     update.effective_user = MagicMock(id=user_id)
+    update.effective_chat = MagicMock(type=chat_type)
     if callback_data is not None:
         message = make_message()
         query = MagicMock()
@@ -30,10 +31,11 @@ def make_update(user_id=111, text=None, args=None, callback_data=None):
     return update
 
 
-def make_context(conn, config, texts=None, thresholds=None, args=None):
+def make_context(conn, config, texts=None, thresholds=None, args=None, user_data=None):
     context = MagicMock()
     context.bot_data = {"conn": conn, "config": config, "texts": texts, "thresholds": thresholds}
     context.args = args or []
+    context.user_data = user_data if user_data is not None else {}
     context.bot = MagicMock()
     context.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
     context.bot.edit_message_reply_markup = AsyncMock()
