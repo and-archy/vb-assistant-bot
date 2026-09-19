@@ -1,8 +1,10 @@
 import asyncio
 from dataclasses import replace
 from datetime import date
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from helpers import make_context, make_update
+from telegram.error import NetworkError
 
 from vb_assistant_bot import db, scheduler
 
@@ -308,3 +310,53 @@ def test_job_autopublish_noop_without_pending_preview(conn, config, texts, thres
     context = make_context(conn, config, texts=texts, thresholds=thresholds)
     asyncio.run(scheduler.job_autopublish(context))
     context.bot.send_message.assert_not_called()
+
+
+def test_publish_retries_then_succeeds_on_transient_network_error(conn, config, texts, thresholds):
+    """Регрес: httpx.ReadError (PTB обгортає в NetworkError) на першій
+    спробі раніше означало, що ранкове повідомлення взагалі не йшло в
+    General до наступного дня (job_autopublish — раз на добу)."""
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    context.bot.send_message = AsyncMock(
+        side_effect=[NetworkError("httpx.ReadError: "), MagicMock(message_id=1)]
+    )
+
+    with patch("vb_assistant_bot.scheduler.asyncio.sleep", new=AsyncMock()) as sleep_mock:
+        asyncio.run(scheduler._publish(context, "текст", "2026-01-01"))
+
+    assert context.bot.send_message.await_count == 2
+    sleep_mock.assert_awaited_once()
+
+
+def test_job_autopublish_reschedules_when_publish_keeps_failing(conn, config, texts, thresholds):
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True))
+    morning_key = date.today().isoformat()
+    asyncio.run(
+        scheduler.on_preview_action(
+            make_update(user_id=111, callback_data=f"prev:{morning_key}:send"), context
+        )
+    )
+
+    async def flaky_send(*, chat_id, text, **kwargs):
+        if chat_id == config.group_chat_id:
+            raise NetworkError("httpx.ReadError: ")
+        return MagicMock(message_id=1)
+
+    context.bot.send_message = AsyncMock(side_effect=flaky_send)
+    context.job_queue = MagicMock()
+
+    with patch("vb_assistant_bot.scheduler.asyncio.sleep", new=AsyncMock()):
+        asyncio.run(scheduler.job_autopublish(context))
+
+    # Стан лишається "queued" — наступний запуск джоби (реджедул) знову
+    # спробує опублікувати те саме, нічого не втрачено.
+    assert db.get_preview(conn, morning_key)["status"] == "queued"
+    context.job_queue.run_once.assert_called_once_with(scheduler.job_autopublish, when=300)
+    # Адмінів явно попереджено, а не лише мовчки заплановано повтор.
+    warn_calls = [
+        call
+        for call in context.bot.send_message.await_args_list
+        if "Не вдалося" in call.kwargs.get("text", "")
+    ]
+    assert len(warn_calls) == len(config.admin_user_ids)

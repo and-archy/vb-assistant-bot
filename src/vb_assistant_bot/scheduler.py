@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -258,20 +259,15 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if preview["status"] == "queued":
-        now = datetime.now(UTC).isoformat()
-        await _publish(context, preview["message_text"], morning_key)
-        db.resolve_preview(conn, morning_key, "published", preview["resolved_by"], now)
-        db.add_send_log(
+        await _publish_and_resolve(
+            context,
             conn,
-            morning_date=morning_key,
-            variant_set=preview["variant_set"],
-            variant_id=preview["variant_id"],
+            morning_key,
+            preview,
+            status="published",
             mode="manual",
             sent_by=preview["resolved_by"],
-            sent_at=now,
-            group_message_id=None,
         )
-        await _broadcast_current_view(context, conn, morning_key)
         return
 
     if preview["status"] != "pending" or not preview["triggered"]:
@@ -290,26 +286,90 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
                 logger.error("Не вдалося надіслати нагадування адміну %s: %s", admin_id, exc)
         return
 
+    await _publish_and_resolve(
+        context, conn, morning_key, preview, status="auto_sent", mode="auto", sent_by=None
+    )
+
+
+_PUBLISH_RETRY_DELAYS = (3, 8)  # секунди між спробами всередині одного виклику
+_PUBLISH_RESCHEDULE_SECONDS = 300  # якщо й повтори не допомогли — ще раз через 5 хв
+
+
+async def _publish(context: ContextTypes.DEFAULT_TYPE, text: str, morning_key: str) -> None:
+    """Публікація в GROUP_CHAT_ID з кількома спробами. Раніше — єдиний
+    незахищений виклик, що спрацьовував лише РАЗ НА ДОБУ (job_autopublish
+    о 8:00): одна мережева гикавка (httpx.ReadError тощо — PTB обгортає
+    в NetworkError/TelegramError) означала, що ранкове повідомлення не
+    йшло в General взагалі до наступного дня, а адміни дізнавались лише
+    з різкого '⚠️ Помилка в боті' від глобального error-handler."""
+    config: Config = context.bot_data["config"]
+    attempts = len(_PUBLISH_RETRY_DELAYS) + 1
+    for attempt in range(attempts):
+        try:
+            await context.bot.send_message(chat_id=config.group_chat_id, text=text)
+            logger.info("Опубліковано ранкове повідомлення в General (%s)", morning_key)
+            return
+        except TelegramError as exc:
+            if attempt == attempts - 1:
+                raise
+            delay = _PUBLISH_RETRY_DELAYS[attempt]
+            logger.warning(
+                "Публікація в General не вдалась (спроба %s/%s, %s): %s — повторюю через %sс",
+                attempt + 1,
+                attempts,
+                morning_key,
+                exc,
+                delay,
+            )
+            await asyncio.sleep(delay)
+
+
+async def _publish_and_resolve(
+    context: ContextTypes.DEFAULT_TYPE,
+    conn,
+    morning_key: str,
+    preview,
+    *,
+    status: str,
+    mode: str,
+    sent_by: int | None,
+) -> None:
+    try:
+        await _publish(context, preview["message_text"], morning_key)
+    except TelegramError as exc:
+        config: Config = context.bot_data["config"]
+        logger.error(
+            "Публікація в General не вдалась після повторів (%s): %s — повтор через %sс",
+            morning_key,
+            exc,
+            _PUBLISH_RESCHEDULE_SECONDS,
+        )
+        note = (
+            f"⚠️ Не вдалося опублікувати ранкове повідомлення в General через мережеву "
+            f"помилку ({exc}). Спробую ще раз автоматично за "
+            f"{_PUBLISH_RESCHEDULE_SECONDS // 60} хв — нічого робити не треба."
+        )
+        for admin_id in config.admin_user_ids:
+            try:
+                await context.bot.send_message(chat_id=admin_id, text=note)
+            except TelegramError:
+                pass
+        context.job_queue.run_once(job_autopublish, when=_PUBLISH_RESCHEDULE_SECONDS)
+        return
+
     now = datetime.now(UTC).isoformat()
-    await _publish(context, preview["message_text"], morning_key)
-    db.resolve_preview(conn, morning_key, "auto_sent", None, now)
+    db.resolve_preview(conn, morning_key, status, sent_by, now)
     db.add_send_log(
         conn,
         morning_date=morning_key,
         variant_set=preview["variant_set"],
         variant_id=preview["variant_id"],
-        mode="auto",
-        sent_by=None,
+        mode=mode,
+        sent_by=sent_by,
         sent_at=now,
         group_message_id=None,
     )
     await _broadcast_current_view(context, conn, morning_key)
-
-
-async def _publish(context: ContextTypes.DEFAULT_TYPE, text: str, morning_key: str) -> None:
-    config: Config = context.bot_data["config"]
-    await context.bot.send_message(chat_id=config.group_chat_id, text=text)
-    logger.info("Опубліковано ранкове повідомлення в General (%s)", morning_key)
 
 
 async def _broadcast_current_view(
