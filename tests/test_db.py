@@ -175,6 +175,64 @@ def test_preview_lifecycle(conn):
     assert preview["resolved_by"] == 111
 
 
+def test_resolve_preview_queued_sets_and_clears_scheduled_at(conn):
+    db.upsert_preview(
+        conn,
+        morning_date="2026-09-04",
+        status="pending",
+        day_type="workday",
+        variant_set="A",
+        variant_id="A1",
+        message_text="текст",
+        stats_json="{}",
+        stats_intro="",
+        triggered=False,
+        created_at="2026-09-04T07:01:00+00:00",
+    )
+    db.resolve_preview(
+        conn,
+        "2026-09-04",
+        "queued",
+        111,
+        "2026-09-04T07:05:00+00:00",
+        scheduled_at="2026-09-04T07:30:00+00:00",
+    )
+    assert db.get_preview(conn, "2026-09-04")["scheduled_at"] == "2026-09-04T07:30:00+00:00"
+
+    # Скасування (повернення до "pending") прибирає й заплановий час.
+    db.resolve_preview(conn, "2026-09-04", "pending", None, None)
+    assert db.get_preview(conn, "2026-09-04")["scheduled_at"] is None
+
+
+def test_due_queued_previews_filters_by_scheduled_at(conn):
+    db.upsert_preview(
+        conn,
+        morning_date="2026-09-04",
+        status="pending",
+        day_type="workday",
+        variant_set="A",
+        variant_id="A1",
+        message_text="текст",
+        stats_json="{}",
+        stats_intro="",
+        triggered=False,
+        created_at="2026-09-04T07:01:00+00:00",
+    )
+    db.resolve_preview(
+        conn,
+        "2026-09-04",
+        "queued",
+        111,
+        "2026-09-04T07:05:00+00:00",
+        scheduled_at="2026-09-04T07:30:00+00:00",
+    )
+
+    assert db.due_queued_previews(conn, "2026-09-04T07:00:00+00:00") == []
+    due = db.due_queued_previews(conn, "2026-09-04T08:00:00+00:00")
+    assert len(due) == 1
+    assert due[0]["morning_date"] == "2026-09-04"
+
+
 def test_upsert_preview_resets_resolution_and_messages(conn):
     db.upsert_preview(
         conn,
@@ -209,6 +267,7 @@ def test_upsert_preview_resets_resolution_and_messages(conn):
     preview = db.get_preview(conn, "2026-09-04")
     assert preview["status"] == "pending"
     assert preview["resolved_by"] is None
+    assert preview["scheduled_at"] is None
     assert db.preview_messages(conn, "2026-09-04") == []
 
 

@@ -20,7 +20,7 @@ alerts.in.ua ──poll (JobQueue.run_repeating)──▶ [1] alerts_client + ti
                           ▼                              ▼                      ▼
               [3] night_logic (тригер)        [4] deck + message_builder   [5] scheduler
               compute_night_stats,             перетасована колода +      07:01 preview /
-              is_heavy_night                    build_message              08:00 autopublish
+              is_heavy_night                    build_message              7:30 autopublish
                           │                              │                      │
                           └──────────────┬───────────────┘                      │
                                          ▼                                      ▼
@@ -179,28 +179,41 @@ CREATE TABLE send_log (
 (скільки адмінів реально отримали DM, вердикт тригера) — і `/support`,
 і джоба логують/показують цей результат, ніколи не мовчать.
 
-### Стейт-машина `preview_state.status` (2026-09-18+)
+### Стейт-машина `preview_state.status` (2026-09-20+)
 
 ```
-pending ──send──▶ queued ──cancel──▶ pending
+pending ──send──▶ pending (лише інше меню: Зараз/фіксований/довільний час)
    │                  │
-   └──skip──▶ skipped │
-                       └── job_autopublish (08:00) ──▶ published
-pending (triggered=1, ніхто не натиснув) ── job_autopublish ──▶ auto_sent (якщо AUTO_PUBLISH_ENABLED)
+   │        send_now/send_fixed/send_custom
+   │                  ▼
+   │              queued (scheduled_at = обраний момент) ──cancel──▶ pending
+   │                  │
+   └──skip──▶ skipped └── job_publish_queued (поллер, scheduled_at <= now) ──▶ published
+
+pending (triggered=1, ніхто не натиснув) ── job_autopublish (autopublish_time) ──▶ auto_sent (якщо AUTO_PUBLISH_ENABLED)
 ```
 
-**Вимога 2026-09-18:** «Надіслати» більше не публікує миттєво в групу —
-лише переводить `pending → queued` (зберігає `resolved_by` = хто
-натиснув). Фактична публікація в `GROUP_CHAT_ID` відбувається лише на
-`job_autopublish` о 08:00, незалежно від `triggered` — це дає вікно
-для «Скасувати» (`queued → pending`, `resolved_by` скидається),
-вибору іншого тексту/тону і повторного «Надіслати» до 8:00.
+**Вимога 2026-09-18, уточнено 2026-09-20:** «Надіслати» більше не
+публікує миттєво в групу, і більше не планує одразу на фіксований
+час — спершу питає адміна, коли: **Зараз** (`send_now`), фіксований
+час (`send_fixed`, `autopublish_time` з `config/thresholds.json`, за
+замовчуванням **7:30**, було 8:00 — якщо він уже минув сьогодні,
+публікує негайно) або довільний сьогоднішній час (`send_custom` →
+текстовий ввід `гг:хх`). Будь-який з трьох переводить `pending →
+queued` з конкретним `scheduled_at` і зберігає `resolved_by` = хто
+натиснув. Фактичну публікацію в `GROUP_CHAT_ID` виконує **окремий
+поллер** `job_publish_queued` (раз/хв, як `custom.job_dispatch`), щойно
+`scheduled_at` настав — незалежно від `triggered`; єдина добова
+`job_autopublish` більше НЕ чіпає `queued` взагалі. До обраного часу
+працює «Скасувати» (`queued → pending`, `resolved_by`/`scheduled_at`
+скидаються), вибір іншого тексту/тону і повторний виклик підменю
+«Надіслати».
 
 `on_preview_action` — гейт на `ADMIN_USER_IDS`, дозволені дії залежно
-від `status`: `pending` → `{send, more, calm, skip}`; `queued` → `{cancel}`.
-Будь-яка інша комбінація (застаріла кнопка, вже вирішено) → «Вже
-оброблено» і поточний справжній стан підвантажується в повідомлення,
-що клікнули.
+від `status`: `pending` → `{send, send_now, send_fixed, send_custom,
+send_back, more, calm, skip}`; `queued` → `{cancel}`. Будь-яка інша
+комбінація (застаріла кнопка, вже вирішено) → «Вже оброблено» і
+поточний справжній стан підвантажується в повідомлення, що клікнули.
 
 **`_broadcast_current_view`** — після КОЖНОЇ зміни стану (send/cancel/
 skip/more/calm) переписує (`edit_message_text`) повідомлення в
@@ -210,19 +223,24 @@ skip/more/calm) переписує (`edit_message_text`) повідомленн�
 ваду, коли «Інший варіант»/«Стриманий тон» оновлював лише клікнуте
 повідомлення).
 
-## [7] Автопублікація/диспетчеризація — scheduler.job_autopublish
+## [7] Автопублікація/диспетчеризація — job_autopublish + job_publish_queued
 
-08:00, дві незалежні гілки:
+Два незалежні джерела публікації в `GROUP_CHAT_ID`, розділені
+2026-09-20 (раніше — одна добова `job_autopublish`):
 
-1. **`status == "queued"`** (адмін уже натиснув «Надіслати» будь-коли
-   до 8:00, незалежно від `triggered`) — публікує `message_text` у
-   `GROUP_CHAT_ID` просто зараз, резолвить `published`, `send_log.mode
-   = "manual"`, `sent_by` = той, хто натиснув. Це основний шлях з
-   2026-09-18.
-2. **`status == "pending"` і `triggered`** (ніхто не відреагував на
-   важку ніч) — безлюдний резервний шлях: `AUTO_PUBLISH_ENABLED=false`
+1. **`job_publish_queued`** — поллер `run_repeating` (раз/хв, як
+   `custom.job_dispatch`, HLD [6]): публікує кожне `status == "queued"`,
+   чий `scheduled_at` уже настав, — незалежно від `triggered`.
+   `scheduled_at` обирає адмін через підменю «Надіслати» (Зараз/
+   фіксований/довільний час, HLD вище). Резолвить `published`,
+   `send_log.mode = "manual"`, `sent_by` = той, хто натиснув.
+2. **`job_autopublish`** — добова `run_daily` на `autopublish_time`
+   (`config/thresholds.json`, за замовч. **7:30**, було 8:00): лише
+   гілка **`status == "pending"` і `triggered`** (ніхто не відреагував
+   на важку ніч) — безлюдний резервний шлях: `AUTO_PUBLISH_ENABLED=false`
    (дефолт першого місяця, ТЗ п.13) — лише нагадує адмінам; `=true` —
    публікує сам, резолвить `auto_sent`, `send_log.mode = "auto"`.
+   `queued` тут більше НЕ обробляється.
 
 `status == "pending"` і НЕ `triggered` (спокійна ніч, ніхто не
 відповів) — тиша, очікуваний результат, не збій. `status == "skipped"`
@@ -230,17 +248,20 @@ skip/more/calm) переписує (`edit_message_text`) повідомленн�
 
 **Інцидент 2026-09-19: `_publish` без захисту від мережевих гикавок.**
 Публікація в `GROUP_CHAT_ID` — єдиний виклик `bot.send_message` без
-жодного `try/except`, і `job_autopublish` спрацьовує лише РАЗ НА ДОБУ
-(`run_daily` о 8:00): одна транзієнтна мережева помилка (`httpx.
-ReadError` — PTB обгортає в `NetworkError`/`TelegramError`, HLD [1])
-означала, що повідомлення не йшло в General взагалі до наступного
-дня, а адміни дізнавались лише з різкого `⚠️ Помилка в боті` від
-глобального error-handler [8], без жодної спроби повтору. Виправлено:
-`_publish` — до 3 спроб з паузами 3с/8с; якщо й це не допомогло —
-`_publish_and_resolve` явно попереджає адмінів (не мовчки) і планує
-повторний виклик `job_autopublish` через `job_queue.run_once(...,
-when=300)` — стан лишається `queued`/`pending`, нічого не втрачено,
-наступна спроба природно повторює ту саму логіку.
+жодного `try/except`, і `job_autopublish` тоді спрацьовував лише РАЗ
+НА ДОБУ (`run_daily` о 8:00): одна транзієнтна мережева помилка
+(`httpx.ReadError` — PTB обгортає в `NetworkError`/`TelegramError`,
+HLD [1]) означала, що повідомлення не йшло в General взагалі до
+наступного дня, а адміни дізнавались лише з різкого `⚠️ Помилка в
+боті` від глобального error-handler [8], без жодної спроби повтору.
+Виправлено: `_publish` — до 3 спроб з паузами 3с/8с; якщо й це не
+допомогло — `_publish_and_resolve` явно попереджає адмінів (не мовчки)
+і планує повторний виклик `job_queue.run_once(retry_job, when=300)` —
+`retry_job` це та ж джоба, що викликала `_publish_and_resolve`
+(`job_publish_queued` для `queued`, `job_autopublish` для `auto_sent`,
+розділені 2026-09-20), стан лишається `queued`/`pending`, нічого не
+втрачено, наступна спроба природно повторює ту саму логіку (перечитує
+`preview_state` заново, тож бачить, якщо статус уже змінився).
 
 ## [8] Відмовостійкість — /support і глобальний error handler
 
@@ -271,8 +292,12 @@ when=300)` — стан лишається `queued`/`pending`, нічого не
 `custom_messages` — власна таблиця, незалежна від `preview_state`:
 `status` ∈ `{scheduled, cancelled, sent}`. `job_dispatch` (кожні 60с,
 `scheduler.register`) публікує все, де `scheduled_at <= now` — точність
-до хвилини достатня для довільно обраного адміном часу (на відміну від
-фіксованих 07:01/08:00 ранкового циклу, де `run_daily` доречніший).
+до хвилини достатня для довільно обраного адміном часу. Той самий
+поллер-патерн (2026-09-20) тепер і в самого ранкового прев'ю —
+`scheduler.job_publish_queued` для `preview_state.status == "queued"` —
+бо обраний адміном час (зараз/фіксований/довільний) уже не завжди
+збігається з фіксованими 07:01/`autopublish_time`-якорями ранкового
+циклу, де `run_daily` (без опитування) лишається доречним.
 
 `_broadcast` — той самий патерн, що й `scheduler._broadcast_current_view`:
 після кожної зміни (створення/скасування/редагування тексту чи часу)

@@ -1,6 +1,7 @@
 from telegram import ReplyKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from vb_assistant_bot import scheduler
 from vb_assistant_bot.access import ensure_admin
 from vb_assistant_bot.config import Config
 from vb_assistant_bot.handlers import custom, support, weekend
@@ -36,8 +37,9 @@ _HELP_TEXT = (
     "/markworkday, /custom, /cancel.\n\n"
     "Щоранку бот сам оцінює ніч і надсилає сюди прев'ю (статистика + "
     "готовий текст) з кнопками: Надіслати / Інший варіант / Стриманий "
-    "тон / Пропустити сьогодні. «Надіслати» планує публікацію на 8:00 — "
-    "до цього часу можна скасувати чи обрати інший варіант."
+    "тон / Пропустити сьогодні. «Надіслати» питає, коли публікувати: "
+    "Зараз / фіксований час (за замовчуванням 7:30) / обрати інший час — "
+    "до обраного часу можна скасувати чи обрати інший варіант."
 )
 
 
@@ -54,17 +56,21 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Кнопки завжди виконують свою дію одразу, навіть якщо в адміна
-    незавершений `/custom` (очікує текст чи час) — MessageHandler для
-    кнопок зареєстрований ПЕРЕД загальним текстовим хендлером
-    (custom.on_text), тож перехоплює натискання першим. Для будь-якої
-    кнопки, крім «Своє повідомлення» (свідомо стартує/перезапускає
-    той самий потік) і «Скасувати» (сам чистить стан), незавершений
-    ввід скидається тут — інакше наступне звичайне повідомлення
+    незавершений `/custom` (очікує текст чи час) або незавершений вибір
+    довільного часу відправки прев'ю (`scheduler` callback "send_custom")
+    — MessageHandler для кнопок зареєстрований ПЕРЕД загальним текстовим
+    хендлером (custom.on_text), тож перехоплює натискання першим.
+    Скидаємо `scheduler`-стан для будь-якої кнопки, крім «Скасувати»
+    (сама його чистить із відповіддю), і `custom`-стан для будь-якої,
+    крім «Своє повідомлення» (свідомо стартує/перезапускає той самий
+    потік) і «Скасувати» — інакше наступне звичайне повідомлення
     адміна помилково зчиталось би як текст/час свого повідомлення."""
     if update.effective_chat is None or update.effective_chat.type != "private":
         return
     text = update.effective_message.text if update.effective_message else None
 
+    if text != BTN_CANCEL:
+        scheduler.reset_send_state(context)
     if text not in (BTN_CUSTOM, BTN_CANCEL):
         custom.reset_state(context)
 
@@ -79,6 +85,9 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         context.args = []
         await weekend.mark_workday(update, context)
     elif text == BTN_CANCEL:
-        await custom.cancel_compose(update, context)
+        if scheduler.pop_send_state(context) is not None:
+            await update.effective_message.reply_text("Скасовано.")
+        else:
+            await custom.cancel_compose(update, context)
     elif text == BTN_HELP:
         await start(update, context)

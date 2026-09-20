@@ -82,6 +82,13 @@ def main() -> None:
     # натискання кнопки ніколи не потрапляє в custom.on_text.
     application.add_handler(MessageHandler(filters.Text(menu.BUTTON_LABELS), menu.on_button))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, custom.on_text))
+    # Окрема група (не зупиняє й не залежить від хендлерів вище — PTB
+    # виконує по одному збігу на КОЖНУ групу): очікування довільного часу
+    # відправки прев'ю (callback "send_custom") — власний стан у
+    # user_data, ортогональний до /custom.
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, scheduler.on_text), group=1
+    )
     application.add_error_handler(on_error)
 
     scheduler.register(application, config, thresholds)

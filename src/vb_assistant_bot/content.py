@@ -29,7 +29,7 @@ class Thresholds:
     ballistic_threshold_multiplier: float
     ballistic_threat_types: frozenset[str]
     preview_time: time = time(7, 1)
-    autopublish_time: time = time(8, 0)
+    autopublish_time: time = time(7, 30)
     alerts_poll_interval_seconds: int = 90
 
 
@@ -72,6 +72,6 @@ def load_thresholds(path: str) -> Thresholds:
         ballistic_threshold_multiplier=float(raw["ballistic_threshold_multiplier"]),
         ballistic_threat_types=frozenset(raw["ballistic_threat_types"]),
         preview_time=_parse_hhmm(raw.get("preview_time", "07:01")),
-        autopublish_time=_parse_hhmm(raw.get("autopublish_time", "08:00")),
+        autopublish_time=_parse_hhmm(raw.get("autopublish_time", "07:30")),
         alerts_poll_interval_seconds=int(raw.get("alerts_poll_interval_seconds", 90)),
     )

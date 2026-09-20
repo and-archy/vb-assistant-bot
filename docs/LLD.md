@@ -118,10 +118,18 @@ async def poll_alerts(context) -> None: ...
 async def generate_and_send_preview(context, *, force: bool) -> PreviewResult: ...  # шле завжди
 async def job_preview(context) -> None: ...
 async def job_autopublish(context) -> None: ...
-# 08:00: status=="queued" -> публікує незалежно від triggered (2026-09-18+);
-# інакше лише коли status=="pending" AND triggered -> нагадування/автопублікація.
+# autopublish_time (7:30): лише коли status=="pending" AND triggered ->
+# нагадування/автопублікація. "queued" тут НЕ обробляється (2026-09-20+).
+async def job_publish_queued(context) -> None: ...
+# поллер (раз/хв, як custom.job_dispatch): публікує status=="queued" AND
+# scheduled_at <= now — незалежно від triggered; сам scheduled_at обирає
+# адмін через send/send_now/send_fixed/send_custom.
 async def on_preview_action(update, context) -> None: ...          # callback_data "prev:<date>:<action>"
-# action залежить від status: pending -> {send, more, calm, skip}; queued -> {cancel}
+# action залежить від status:
+#   pending -> {send, send_now, send_fixed, send_custom, send_back, more, calm, skip}
+#   queued  -> {cancel}
+# "send" лише показує підменю часу (не міняє status); send_now/send_fixed/
+# send_custom ставлять status="queued" з конкретним scheduled_at.
 ```
 
 ```python
@@ -134,10 +142,14 @@ async def on_error(update, context: ContextTypes.DEFAULT_TYPE) -> None: ...
 ## Callback data формат
 
 `prev:<morning_date ISO>:<action>`, `<action>` ∈
-`{send, more, calm, skip, cancel}` — дозволені залежно від поточного
-`status` (див. scheduler.py вище). `send` з 2026-09-18 не публікує
-одразу — переводить `pending → queued`, фактична публікація лише на
-`job_autopublish` о 08:00 (вікно для `cancel`/зміни тексту).
+`{send, send_now, send_fixed, send_custom, send_back, more, calm, skip,
+cancel}` — дозволені залежно від поточного `status` (див. scheduler.py
+вище). `send` (2026-09-20+) не публікує й не міняє `status` — лише
+показує підменю часу; `send_now`/`send_fixed`/`send_custom` переводять
+`pending → queued` із конкретним `scheduled_at` (зараз / `autopublish_time`,
+за замовч. 7:30 / довільний сьогоднішній час), фактична публікація —
+`job_publish_queued` (поллер, раз/хв), не єдина добова джоба. `send_back`
+повертає до звичайного вигляду `pending` без змін у БД.
 
 ## Callback data формат — /custom
 

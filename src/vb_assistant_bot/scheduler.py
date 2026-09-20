@@ -1,8 +1,9 @@
 import asyncio
 import json
 import logging
+import re
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, time
 from zoneinfo import ZoneInfo
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -20,6 +21,7 @@ from vb_assistant_bot.night_logic import compute_night_stats, is_heavy_night
 from vb_assistant_bot.timeutil import to_canonical_utc_iso
 
 _CUSTOM_MESSAGE_POLL_SECONDS = 60
+_QUEUED_PREVIEW_POLL_SECONDS = 60
 
 logger = logging.getLogger(__name__)
 
@@ -27,10 +29,19 @@ _DEFAULT_SET_WEEKDAY = "A"
 _DEFAULT_SET_WEEKEND = "V"
 _CALM_SET = "B"
 
-_PENDING_ACTIONS = frozenset({"send", "more", "calm", "skip"})
+_PENDING_ACTIONS = frozenset(
+    {"send", "more", "calm", "skip", "send_now", "send_fixed", "send_custom", "send_back"}
+)
 _QUEUED_ACTIONS = frozenset({"cancel"})
 
 _EMPTY_KEYBOARD = InlineKeyboardMarkup([])
+
+# user_data ключ: якщо є — очікуємо від адміна текст "гг:хх" для
+# довільного часу відправки прев'ю з таким morning_date (callback
+# "send_custom" в on_preview_action).
+_SEND_TIME_STEP_KEY = "prev_send_time_for"
+
+_HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
 
 @dataclass(frozen=True)
@@ -71,14 +82,38 @@ def _queued_keyboard(morning_date: str) -> InlineKeyboardMarkup:
     )
 
 
+def _send_time_keyboard(morning_date: str, fixed_label: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Зараз", callback_data=f"prev:{morning_date}:send_now")],
+            [
+                InlineKeyboardButton(
+                    f"Відправити {fixed_label}", callback_data=f"prev:{morning_date}:send_fixed"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "Обрати інший час відправки", callback_data=f"prev:{morning_date}:send_custom"
+                )
+            ],
+            [InlineKeyboardButton("Назад", callback_data=f"prev:{morning_date}:send_back")],
+        ]
+    )
+
+
 def _pending_body(preview) -> str:
     return f"{preview['stats_intro']}\n\nГотовий текст:\n{preview['message_text']}"
 
 
-def _queued_body(preview) -> str:
+def _send_time_body(preview) -> str:
+    return f"{_pending_body(preview)}\n\nКоли відправити?"
+
+
+def _queued_body(preview, timezone: str) -> str:
     return (
         f"{preview['stats_intro']}\n\n"
-        f"📤 Заплановано до публікації о {_time_label(preview)}:\n{preview['message_text']}"
+        f"📤 Заплановано до публікації о {_scheduled_label(preview, timezone)}:"
+        f"\n{preview['message_text']}"
     )
 
 
@@ -90,16 +125,31 @@ def _published_body(preview) -> str:
     return f"{preview['stats_intro']}\n\n✅ Опубліковано в General:\n{preview['message_text']}"
 
 
-def _time_label(preview) -> str:  # noqa: ARG001 — залишає гачок для конфігурованого часу пізніше
-    return "8:00"
+def _format_time(value: time) -> str:
+    return f"{value.hour}:{value.minute:02d}"
 
 
-def _view_for(preview, morning_key: str) -> tuple[str, InlineKeyboardMarkup]:
+def _scheduled_label(preview, timezone: str) -> str:
+    raw = preview["scheduled_at"]
+    if not raw:
+        return "?"
+    local = datetime.fromisoformat(raw).astimezone(ZoneInfo(timezone))
+    return _format_time(local.time())
+
+
+def _parse_hhmm_input(text: str) -> time | None:
+    match = _HHMM_RE.match(text.strip())
+    if not match:
+        return None
+    return time(int(match.group(1)), int(match.group(2)))
+
+
+def _view_for(preview, morning_key: str, timezone: str) -> tuple[str, InlineKeyboardMarkup]:
     status = preview["status"]
     if status == "pending":
         return _pending_body(preview), _pending_keyboard(morning_key)
     if status == "queued":
-        return _queued_body(preview), _queued_keyboard(morning_key)
+        return _queued_body(preview, timezone), _queued_keyboard(morning_key)
     if status == "skipped":
         return _skipped_body(preview), _EMPTY_KEYBOARD
     if status in ("published", "auto_sent"):
@@ -119,6 +169,68 @@ def register(application: Application, config: Config, thresholds: Thresholds) -
     application.job_queue.run_repeating(
         custom_messages.job_dispatch, interval=_CUSTOM_MESSAGE_POLL_SECONDS, first=10
     )
+    application.job_queue.run_repeating(
+        job_publish_queued, interval=_QUEUED_PREVIEW_POLL_SECONDS, first=15
+    )
+
+
+def pop_send_state(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    """Прибирає стан очікування довільного часу відправки (callback
+    "send_custom") — повертає morning_key, якщо такий стан був, інакше
+    None. Викликає menu.on_button при перемиканні на іншу кнопку/дію."""
+    return context.user_data.pop(_SEND_TIME_STEP_KEY, None)
+
+
+def reset_send_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    pop_send_state(context)
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Текст після callback "send_custom" — очікуваний формат гг:хх для
+    сьогоднішньої публікації цього прев'ю. Зареєстрований в окремій
+    групі хендлерів (незалежно від custom.on_text), тож не заважає й не
+    залежить від потоку /custom."""
+    if update.effective_chat is None or update.effective_chat.type != "private":
+        return
+    morning_key = context.user_data.get(_SEND_TIME_STEP_KEY)
+    if not morning_key:
+        return
+
+    config: Config = context.bot_data["config"]
+    user = update.effective_user
+    if user is None or user.id not in config.admin_user_ids:
+        return
+
+    conn = context.bot_data["conn"]
+    preview = db.get_preview(conn, morning_key)
+    if preview is None or preview["status"] != "pending":
+        pop_send_state(context)
+        await update.effective_message.reply_text("Прев'ю більше не активне.")
+        return
+
+    text = update.effective_message.text or ""
+    parsed = _parse_hhmm_input(text)
+    if parsed is None:
+        await update.effective_message.reply_text(
+            "Невірний формат. Спробуйте ще: гг:хх, наприклад 07:15."
+        )
+        return
+
+    tz = ZoneInfo(config.timezone)
+    now_local = datetime.now(tz)
+    target_local = datetime.combine(now_local.date(), parsed, tzinfo=tz)
+    if target_local <= now_local:
+        await update.effective_message.reply_text(
+            "Час уже минув. Вкажіть пізніший сьогоднішній час: гг:хх"
+        )
+        return
+
+    pop_send_state(context)
+    scheduled_at = target_local.astimezone(UTC).isoformat()
+    now_utc = datetime.now(UTC).isoformat()
+    db.resolve_preview(conn, morning_key, "queued", user.id, now_utc, scheduled_at=scheduled_at)
+    await _broadcast_current_view(context, conn, morning_key)
+    await update.effective_message.reply_text(f"Заплановано на {_format_time(parsed)}.")
 
 
 async def poll_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -204,7 +316,7 @@ async def generate_and_send_preview(
     )
 
     preview = db.get_preview(conn, morning_key)
-    body, keyboard = _view_for(preview, morning_key)
+    body, keyboard = _view_for(preview, morning_key, config.timezone)
     sent_to = 0
     for admin_id in config.admin_user_ids:
         try:
@@ -237,15 +349,15 @@ async def job_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """08:00. Дві незалежні гілки:
+    """thresholds.autopublish_time (за замовч. 7:30) — гілка на важку ніч
+    (`triggered`), яку ніхто не передивився (`status == "pending"`): за
+    замовчуванням лише нагадування (перший місяць, ТЗ п.13), з
+    `AUTO_PUBLISH_ENABLED=true` — бот публікує сам.
 
-    1. `status == "queued"` — адмін уже натиснув «Надіслати» (у будь-який
-       час, незалежно від вердикту алгоритму) — публікуємо те, що він
-       обрав, саме зараз, не раніше (ТЗ: дає час скасувати/змінити текст
-       до 8:00).
-    2. `status == "pending"` і `triggered` — ніхто не відреагував на важку
-       ніч: за замовчуванням лише нагадування (перший місяць, ТЗ п.13),
-       з `AUTO_PUBLISH_ENABLED=true` — бот публікує сам.
+    `status == "queued"` тут більше НЕ обробляється (2026-09-20) — адмін
+    сам обирає час публікації («Зараз» / фіксований / довільний), і саме
+    на нього публікує окремий поллер `job_publish_queued`, а не єдиний
+    добовий job_autopublish.
 
     Спокійна ніч без реакції (`pending`, не `triggered`) — тиша, це
     очікуваний результат, не збій."""
@@ -256,18 +368,6 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     preview = db.get_preview(conn, morning_key)
     if preview is None:
-        return
-
-    if preview["status"] == "queued":
-        await _publish_and_resolve(
-            context,
-            conn,
-            morning_key,
-            preview,
-            status="published",
-            mode="manual",
-            sent_by=preview["resolved_by"],
-        )
         return
 
     if preview["status"] != "pending" or not preview["triggered"]:
@@ -287,8 +387,34 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     await _publish_and_resolve(
-        context, conn, morning_key, preview, status="auto_sent", mode="auto", sent_by=None
+        context,
+        conn,
+        morning_key,
+        preview,
+        status="auto_sent",
+        mode="auto",
+        sent_by=None,
+        retry_job=job_autopublish,
     )
+
+
+async def job_publish_queued(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Поллер (як `custom_messages.job_dispatch`): публікує прев'ю зі
+    статусом 'queued', чий `scheduled_at` (обраний адміном час — зараз /
+    фіксований / довільний) уже настав."""
+    conn = context.bot_data["conn"]
+    now_iso = datetime.now(UTC).isoformat()
+    for preview in db.due_queued_previews(conn, now_iso):
+        await _publish_and_resolve(
+            context,
+            conn,
+            preview["morning_date"],
+            preview,
+            status="published",
+            mode="manual",
+            sent_by=preview["resolved_by"],
+            retry_job=job_publish_queued,
+        )
 
 
 _PUBLISH_RETRY_DELAYS = (3, 8)  # секунди між спробами всередині одного виклику
@@ -333,6 +459,7 @@ async def _publish_and_resolve(
     status: str,
     mode: str,
     sent_by: int | None,
+    retry_job,
 ) -> None:
     try:
         await _publish(context, preview["message_text"], morning_key)
@@ -354,7 +481,7 @@ async def _publish_and_resolve(
                 await context.bot.send_message(chat_id=admin_id, text=note)
             except TelegramError:
                 pass
-        context.job_queue.run_once(job_autopublish, when=_PUBLISH_RESCHEDULE_SECONDS)
+        context.job_queue.run_once(retry_job, when=_PUBLISH_RESCHEDULE_SECONDS)
         return
 
     now = datetime.now(UTC).isoformat()
@@ -378,10 +505,11 @@ async def _broadcast_current_view(
     """Оновлює вигляд прев'ю в ОСОБИСТИХ УСІХ адмінів під поточний стан
     (ТЗ: 'щоб це бачив кожен адміністратор') — не лише в того, хто щойно
     натиснув кнопку."""
+    config: Config = context.bot_data["config"]
     preview = db.get_preview(conn, morning_key)
     if preview is None:
         return
-    body, keyboard = _view_for(preview, morning_key)
+    body, keyboard = _view_for(preview, morning_key, config.timezone)
     for row in db.preview_messages(conn, morning_key):
         try:
             await context.bot.edit_message_text(
@@ -417,7 +545,7 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     if not valid:
         await query.answer("Вже оброблено")
-        body, keyboard = _view_for(preview, morning_key)
+        body, keyboard = _view_for(preview, morning_key, config.timezone)
         try:
             await query.edit_message_text(body, reply_markup=keyboard)
         except TelegramError:
@@ -427,9 +555,56 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     now = datetime.now(UTC).isoformat()
 
     if action == "send":
-        db.resolve_preview(conn, morning_key, "queued", user.id, now)
-        await query.answer("Заплановано до публікації о 8:00")
+        thresholds: Thresholds = context.bot_data["thresholds"]
+        fixed_label = _format_time(thresholds.autopublish_time)
+        await query.answer()
+        try:
+            await query.edit_message_text(
+                _send_time_body(preview),
+                reply_markup=_send_time_keyboard(morning_key, fixed_label),
+            )
+        except TelegramError:
+            pass
+        return
+
+    if action == "send_back":
+        await query.answer()
         await _broadcast_current_view(context, conn, morning_key)
+        return
+
+    if action == "send_now":
+        db.resolve_preview(conn, morning_key, "queued", user.id, now, scheduled_at=now)
+        await query.answer("Публікую...")
+        await _broadcast_current_view(context, conn, morning_key)
+        await job_publish_queued(context)
+        return
+
+    if action == "send_fixed":
+        thresholds = context.bot_data["thresholds"]
+        tz = ZoneInfo(config.timezone)
+        now_local = datetime.now(tz)
+        target_local = datetime.combine(now_local.date(), thresholds.autopublish_time, tzinfo=tz)
+        immediate = target_local <= now_local
+        scheduled_at = (now_local if immediate else target_local).astimezone(UTC).isoformat()
+        db.resolve_preview(conn, morning_key, "queued", user.id, now, scheduled_at=scheduled_at)
+        label = _format_time(thresholds.autopublish_time)
+        await query.answer("Публікую..." if immediate else f"Заплановано на {label}")
+        await _broadcast_current_view(context, conn, morning_key)
+        if immediate:
+            await job_publish_queued(context)
+        return
+
+    if action == "send_custom":
+        context.user_data[_SEND_TIME_STEP_KEY] = morning_key
+        await query.answer()
+        try:
+            await query.edit_message_text(
+                "Введіть час публікації сьогодні у форматі гг:хх (наприклад 07:15). "
+                "/cancel — скасувати.",
+                reply_markup=_EMPTY_KEYBOARD,
+            )
+        except TelegramError:
+            pass
         return
 
     if action == "cancel":

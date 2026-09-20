@@ -17,6 +17,6 @@
   "ballistic_threat_types": ["ballistic_missiles"],
 
   "preview_time": "07:01",
-  "autopublish_time": "08:00",
+  "autopublish_time": "07:30",
   "alerts_poll_interval_seconds": 90
 }

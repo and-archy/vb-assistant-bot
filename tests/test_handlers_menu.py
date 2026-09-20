@@ -3,7 +3,7 @@ from datetime import date
 
 from helpers import make_context, make_update
 
-from vb_assistant_bot import db
+from vb_assistant_bot import db, scheduler
 from vb_assistant_bot.handlers import menu
 
 
@@ -90,6 +90,27 @@ def test_on_button_help_resends_help(conn, config):
     asyncio.run(menu.on_button(update, context))
 
     update.effective_message.reply_text.assert_awaited_once()
+
+
+def test_on_button_cancel_clears_pending_send_time_prompt(conn, config):
+    update = make_update(user_id=111, text=menu.BTN_CANCEL)
+    context = make_context(conn, config)
+    context.user_data[scheduler._SEND_TIME_STEP_KEY] = "2026-09-20"
+
+    asyncio.run(menu.on_button(update, context))
+
+    assert scheduler._SEND_TIME_STEP_KEY not in context.user_data
+    update.effective_message.reply_text.assert_awaited_once_with("Скасовано.")
+
+
+def test_on_button_switching_away_clears_stale_send_time_prompt(conn, config):
+    update = make_update(user_id=111, text=menu.BTN_HELP)
+    context = make_context(conn, config)
+    context.user_data[scheduler._SEND_TIME_STEP_KEY] = "2026-09-20"
+
+    asyncio.run(menu.on_button(update, context))
+
+    assert scheduler._SEND_TIME_STEP_KEY not in context.user_data
 
 
 def test_on_button_switching_away_from_custom_clears_stale_state(conn, config, texts, thresholds):

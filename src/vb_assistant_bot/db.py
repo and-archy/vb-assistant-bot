@@ -51,7 +51,8 @@ CREATE TABLE IF NOT EXISTS preview_state (
     triggered     INTEGER NOT NULL DEFAULT 0,
     created_at    TEXT NOT NULL,
     resolved_at   TEXT,
-    resolved_by   INTEGER
+    resolved_by   INTEGER,
+    scheduled_at  TEXT   -- канонічний UTC ISO8601, лише для status='queued'
 );
 
 CREATE TABLE IF NOT EXISTS preview_messages (
@@ -116,6 +117,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE preview_state ADD COLUMN stats_intro TEXT NOT NULL DEFAULT ''")
     if not _column_exists(conn, "alerts", "alert_level"):
         conn.execute("ALTER TABLE alerts ADD COLUMN alert_level TEXT")
+    if not _column_exists(conn, "preview_state", "scheduled_at"):
+        conn.execute("ALTER TABLE preview_state ADD COLUMN scheduled_at TEXT")
     conn.commit()
     return conn
 
@@ -264,8 +267,8 @@ def upsert_preview(
         INSERT INTO preview_state
             (morning_date, status, day_type, variant_set, variant_id,
              message_text, stats_json, stats_intro, triggered, created_at,
-             resolved_at, resolved_by)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+             resolved_at, resolved_by, scheduled_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
         ON CONFLICT (morning_date) DO UPDATE SET
             status = excluded.status,
             day_type = excluded.day_type,
@@ -277,7 +280,8 @@ def upsert_preview(
             triggered = excluded.triggered,
             created_at = excluded.created_at,
             resolved_at = NULL,
-            resolved_by = NULL
+            resolved_by = NULL,
+            scheduled_at = NULL
         """,
         (
             morning_date,
@@ -327,14 +331,15 @@ def resolve_preview(
     status: str,
     resolved_by: int | None,
     resolved_at: str | None,
+    scheduled_at: str | None = None,
 ) -> None:
     conn.execute(
         """
         UPDATE preview_state
-        SET status = ?, resolved_by = ?, resolved_at = ?
+        SET status = ?, resolved_by = ?, resolved_at = ?, scheduled_at = ?
         WHERE morning_date = ?
         """,
-        (status, resolved_by, resolved_at, morning_date),
+        (status, resolved_by, resolved_at, scheduled_at, morning_date),
     )
     conn.commit()
 
@@ -355,6 +360,16 @@ def add_preview_message(
 def preview_messages(conn: sqlite3.Connection, morning_date: str) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT chat_id, message_id FROM preview_messages WHERE morning_date = ?", (morning_date,)
+    ).fetchall()
+
+
+def due_queued_previews(conn: sqlite3.Connection, now_utc_iso: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT * FROM preview_state
+        WHERE status = 'queued' AND scheduled_at IS NOT NULL AND scheduled_at <= ?
+        """,
+        (now_utc_iso,),
     ).fetchall()
 
 
