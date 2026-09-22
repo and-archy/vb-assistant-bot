@@ -23,6 +23,47 @@ def test_determine_day_type_manual_override(conn):
     assert scheduler.determine_day_type(conn, date(2026, 12, 25)) == "weekend"
 
 
+def test_poll_alerts_runs_blocking_fetch_in_thread_and_upserts(conn, config):
+    """Інцидент 2026-09-22: `fetch_region_history` синхронний і блокував
+    event loop, через що сусідня джоба (`job_preview`) інколи мовчки
+    пропускалась APScheduler-ом (misfire). `poll_alerts` тепер виносить
+    виклик у потік (`asyncio.to_thread`) — перевіряємо, що клієнт
+    викликається (з правильним аргументом) і результат так само
+    записується в `alerts`."""
+    context = make_context(conn, config)
+    record = MagicMock(
+        external_id="e1",
+        location_uid="31",
+        raw_alert_type="air_raid",
+        alert_level="red",
+        threat_types=["ballistic_missiles"],
+        started_at="2026-09-22T01:00:00+00:00",
+        finished_at=None,
+        updated_at="2026-09-22T01:00:00+00:00",
+    )
+    client = MagicMock()
+    client.fetch_region_history = MagicMock(return_value=[record])
+    context.bot_data["alerts_client"] = client
+
+    asyncio.run(scheduler.poll_alerts(context))
+
+    client.fetch_region_history.assert_called_once_with(config.alerts_region_uid)
+    row = conn.execute("SELECT * FROM alerts WHERE external_id = 'e1'").fetchone()
+    assert row is not None
+    assert row["alert_level"] == "red"
+
+
+def test_poll_alerts_logs_and_returns_on_fetch_error(conn, config):
+    context = make_context(conn, config)
+    client = MagicMock()
+    client.fetch_region_history = MagicMock(side_effect=RuntimeError("мережа лягла"))
+    context.bot_data["alerts_client"] = client
+
+    asyncio.run(scheduler.poll_alerts(context))  # не піднімає виняток назовні
+
+    assert conn.execute("SELECT COUNT(*) AS c FROM alerts").fetchone()["c"] == 0
+
+
 def test_generate_and_send_preview_force_sends_to_all_admins(conn, config, texts, thresholds):
     context = make_context(conn, config, texts=texts, thresholds=thresholds)
 

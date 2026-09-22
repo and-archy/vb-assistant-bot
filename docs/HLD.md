@@ -279,6 +279,20 @@ HLD [1]) означала, що повідомлення не йшло в Genera
   `ADMIN_USER_IDS` `⚠️ Помилка в боті: ...` — друга лінія захисту від
   тиші там, де конкретний хендлер сам не подбав про це.
 
+**Інцидент 2026-09-22: `job_preview` (07:01) пропав без жодного логу
+помилки.** Причина не виняток — APScheduler дає щойно доданій джобі
+лише 1с `misfire_grace_time` за замовчуванням: якщо event loop у цю
+мить зайнятий, запуск просто **скипається** (`WARNING: Run time of job
+... was missed by ...`), `_run` навіть не викликає `self.callback`, тож
+нема чого ловити `on_error`. Loop блокував `poll_alerts` — синхронний
+`urllib.request` у `alerts_client.fetch_region_history`, викликаний
+напряму в async-джобі (~1-2с блокування щоцикл, `alerts_poll_interval_
+seconds`). Виправлено на двох рівнях: `poll_alerts` виносить виклик у
+потік (`asyncio.to_thread`), і щоденні якорі (`job_preview`,
+`job_autopublish`) отримали `job_kwargs={"misfire_grace_time": 120}` —
+навіть якщо loop таки притисне, джоба виконається пізніше, а не
+пропаде.
+
 ## [9] Своє повідомлення — handlers/custom.py
 
 Не ConversationHandler (щоб не додавати ще одну абстракцію заради

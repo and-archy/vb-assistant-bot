@@ -157,14 +157,31 @@ def _view_for(preview, morning_key: str, timezone: str) -> tuple[str, InlineKeyb
     return preview["message_text"], _EMPTY_KEYBOARD
 
 
+_MISSED_RUN_GRACE_SECONDS = 120
+
+
 def register(application: Application, config: Config, thresholds: Thresholds) -> None:
+    """Інцидент 2026-09-22: `job_preview` (07:01) пропав мовчки —
+    APScheduler за замовчуванням дає джобі лише 1с `misfire_grace_time`
+    на старт; блокуючий `poll_alerts` (нижче) інколи затримує event loop
+    довше — і замість запізнілого запуску APScheduler просто скипає
+    його (лише WARNING у логах, без винятку, тож глобальний
+    error-handler мовчить). Для щоденних якорів (`job_preview`,
+    `job_autopublish`) даємо суттєвий запас — краще виконати на 1-2 хв
+    пізніше, ніж не виконати взагалі."""
     tz = ZoneInfo(config.timezone)
     application.job_queue.run_repeating(
         poll_alerts, interval=thresholds.alerts_poll_interval_seconds, first=1
     )
-    application.job_queue.run_daily(job_preview, time=thresholds.preview_time.replace(tzinfo=tz))
     application.job_queue.run_daily(
-        job_autopublish, time=thresholds.autopublish_time.replace(tzinfo=tz)
+        job_preview,
+        time=thresholds.preview_time.replace(tzinfo=tz),
+        job_kwargs={"misfire_grace_time": _MISSED_RUN_GRACE_SECONDS},
+    )
+    application.job_queue.run_daily(
+        job_autopublish,
+        time=thresholds.autopublish_time.replace(tzinfo=tz),
+        job_kwargs={"misfire_grace_time": _MISSED_RUN_GRACE_SECONDS},
     )
     application.job_queue.run_repeating(
         custom_messages.job_dispatch, interval=_CUSTOM_MESSAGE_POLL_SECONDS, first=10
@@ -234,12 +251,18 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def poll_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Інцидент 2026-09-22: `fetch_region_history` — синхронний
+    `urllib.request` (`alerts_client.py`), і виклик його напряму тут
+    блокував ЄДИНИЙ event loop на ~1-2с щоразу (кожні
+    `alerts_poll_interval_seconds`) — саме в такому вікні "пропав"
+    `job_preview`. `asyncio.to_thread` виносить блокуючий I/O в
+    окремий потік, не чіпаючи основний loop."""
     conn = context.bot_data["conn"]
     config: Config = context.bot_data["config"]
     client: AlertsInUaClient = context.bot_data["alerts_client"]
 
     try:
-        records = client.fetch_region_history(config.alerts_region_uid)
+        records = await asyncio.to_thread(client.fetch_region_history, config.alerts_region_uid)
     except Exception:
         logger.exception("Не вдалося отримати тривоги з alerts.in.ua")
         return
