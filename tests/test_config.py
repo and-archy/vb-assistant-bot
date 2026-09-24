@@ -32,7 +32,7 @@ def test_load_config_happy_path(monkeypatch):
     assert config.admin_user_ids == frozenset({111, 222})
     assert config.group_chat_id == -100123
     assert config.alerts_region_uid == "31"
-    assert config.auto_publish_enabled is False
+    assert config.auto_publish_enabled is True
 
 
 def test_load_config_requires_at_least_two_admins(monkeypatch):
@@ -54,6 +54,6 @@ def test_load_config_requires_token(monkeypatch):
 
 
 def test_load_config_auto_publish_flag(monkeypatch):
-    _set_env(monkeypatch, AUTO_PUBLISH_ENABLED="true")
+    _set_env(monkeypatch, AUTO_PUBLISH_ENABLED="false")
     config = load_config()
-    assert config.auto_publish_enabled is True
+    assert config.auto_publish_enabled is False

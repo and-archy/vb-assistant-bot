@@ -374,8 +374,9 @@ async def job_preview(context: ContextTypes.DEFAULT_TYPE) -> None:
 async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
     """thresholds.autopublish_time (за замовч. 7:30) — гілка на важку ніч
     (`triggered`), яку ніхто не передивився (`status == "pending"`): за
-    замовчуванням лише нагадування (перший місяць, ТЗ п.13), з
-    `AUTO_PUBLISH_ENABLED=true` — бот публікує сам.
+    замовчуванням (`AUTO_PUBLISH_ENABLED=true`, робочий режим з
+    2026-09-24) бот публікує сам; з `=false` — лише нагадування адмінам
+    (ручний режим тестового періоду, ТЗ п.13).
 
     `status == "queued"` тут більше НЕ обробляється (2026-09-20) — адмін
     сам обирає час публікації («Зараз» / фіксований / довільний), і саме
@@ -399,7 +400,7 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
     if not config.auto_publish_enabled:
         note = (
             "⏰ Прев'ю на сьогодні досі без реакції. Автопублікація вимкнена "
-            "(AUTO_PUBLISH_ENABLED=false — перший місяць лише ручний режим, ТЗ п.13). "
+            "(AUTO_PUBLISH_ENABLED=false — ручний режим). "
             "Натисніть кнопку вище або викличте /support."
         )
         for admin_id in config.admin_user_ids:

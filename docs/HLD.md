@@ -237,9 +237,10 @@ skip/more/calm) переписує (`edit_message_text`) повідомленн�
 2. **`job_autopublish`** — добова `run_daily` на `autopublish_time`
    (`config/thresholds.json`, за замовч. **7:30**, було 8:00): лише
    гілка **`status == "pending"` і `triggered`** (ніхто не відреагував
-   на важку ніч) — безлюдний резервний шлях: `AUTO_PUBLISH_ENABLED=false`
-   (дефолт першого місяця, ТЗ п.13) — лише нагадує адмінам; `=true` —
-   публікує сам, резолвить `auto_sent`, `send_log.mode = "auto"`.
+   на важку ніч) — безлюдний резервний шлях: `AUTO_PUBLISH_ENABLED=true`
+   (дефолт робочого режиму з 2026-09-24) — публікує сам, резолвить
+   `auto_sent`, `send_log.mode = "auto"`; `=false` (ручний режим
+   тестового періоду, ТЗ п.13) — лише нагадує адмінам.
    `queued` тут більше НЕ обробляється.
 
 `status == "pending"` і НЕ `triggered` (спокійна ніч, ніхто не

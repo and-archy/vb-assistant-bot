@@ -195,7 +195,7 @@ DB_PATH=$DATA_DIR/vb_assistant.db
 TIMEZONE=$TIMEZONE
 TEXTS_CONFIG_PATH=$REPO_DIR/config/texts.json
 THRESHOLDS_CONFIG_PATH=$REPO_DIR/config/thresholds.json
-AUTO_PUBLISH_ENABLED=false
+AUTO_PUBLISH_ENABLED=true
 LOG_FILE=
 EOF
     chmod 600 "$ENV_FILE"
@@ -241,9 +241,9 @@ print_summary() {
     echo "Пороги тригера:     $REPO_DIR/config/thresholds.json"
     echo "(зміни в config/*.json теж потребують sudo systemctl restart $SERVICE_NAME)"
     echo
-    echo "УВАГА: AUTO_PUBLISH_ENABLED=false — перший місяць бот лише"
-    echo "надсилає прев'ю адмінам і НІКОЛИ не публікує сам о 08:00."
-    echo "Увімкни autopublish в $ENV_FILE, коли довіра до алгоритму підтверджена."
+    echo "AUTO_PUBLISH_ENABLED=true — якщо по важкій ночі ніхто з адмінів не"
+    echo "відреагував на прев'ю, бот сам публікує в General о 7:30."
+    echo "Ручний режим (лише нагадування): AUTO_PUBLISH_ENABLED=false в $ENV_FILE."
 }
 
 main() {

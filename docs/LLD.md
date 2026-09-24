@@ -41,7 +41,7 @@ class Config:
     timezone: str                      # дефолт "Europe/Kyiv"
     texts_config_path: str
     thresholds_config_path: str
-    auto_publish_enabled: bool          # дефолт False
+    auto_publish_enabled: bool          # дефолт True (з 2026-09-24)
 
 def load_config() -> Config: ...        # .env через python-dotenv
 ```

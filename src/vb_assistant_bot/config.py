@@ -71,6 +71,6 @@ def load_config() -> Config:
         timezone=os.environ.get("TIMEZONE", "Europe/Kyiv"),
         texts_config_path=os.environ.get("TEXTS_CONFIG_PATH", "config/texts.json"),
         thresholds_config_path=os.environ.get("THRESHOLDS_CONFIG_PATH", "config/thresholds.json"),
-        auto_publish_enabled=os.environ.get("AUTO_PUBLISH_ENABLED", "false").strip().lower()
+        auto_publish_enabled=os.environ.get("AUTO_PUBLISH_ENABLED", "true").strip().lower()
         in ("1", "true", "yes"),
     )
