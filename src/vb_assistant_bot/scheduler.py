@@ -378,6 +378,12 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
     2026-09-24) бот публікує сам; з `=false` — лише нагадування адмінам
     (ручний режим тестового періоду, ТЗ п.13).
 
+    Вихідний день (`determine_day_type` — субота/неділя або вручну
+    позначений /markweekend; /markworkday знімає обмеження) — бот НЕ
+    публікує сам навіть з прапорцем, лише нагадує адмінам (2026-09-27):
+    у вихідні рішення лишається за людиною — адмін може змінити текст,
+    обрати інший варіант чи надіслати вручну.
+
     `status == "queued"` тут більше НЕ обробляється (2026-09-20) — адмін
     сам обирає час публікації («Зараз» / фіксований / довільний), і саме
     на нього публікує окремий поллер `job_publish_queued`, а не єдиний
@@ -397,17 +403,22 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
     if preview["status"] != "pending" or not preview["triggered"]:
         return
 
+    if determine_day_type(conn, date.fromisoformat(morning_key)) == "weekend":
+        note = (
+            "⏰ Прев'ю на сьогодні досі без реакції. Сьогодні вихідний — "
+            "автопублікація не виконується. Натисніть кнопку вище, щоб "
+            "надіслати вручну, або викличте /support."
+        )
+        await _notify_admins(context, config, note)
+        return
+
     if not config.auto_publish_enabled:
         note = (
             "⏰ Прев'ю на сьогодні досі без реакції. Автопублікація вимкнена "
             "(AUTO_PUBLISH_ENABLED=false — ручний режим). "
             "Натисніть кнопку вище або викличте /support."
         )
-        for admin_id in config.admin_user_ids:
-            try:
-                await context.bot.send_message(chat_id=admin_id, text=note)
-            except TelegramError as exc:
-                logger.error("Не вдалося надіслати нагадування адміну %s: %s", admin_id, exc)
+        await _notify_admins(context, config, note)
         return
 
     await _publish_and_resolve(
@@ -420,6 +431,14 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
         sent_by=None,
         retry_job=job_autopublish,
     )
+
+
+async def _notify_admins(context: ContextTypes.DEFAULT_TYPE, config: Config, note: str) -> None:
+    for admin_id in config.admin_user_ids:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=note)
+        except TelegramError as exc:
+            logger.error("Не вдалося надіслати нагадування адміну %s: %s", admin_id, exc)
 
 
 async def job_publish_queued(context: ContextTypes.DEFAULT_TYPE) -> None:
