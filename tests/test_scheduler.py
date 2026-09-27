@@ -487,12 +487,19 @@ def _mark_day(conn, morning_key: str, day_type: str) -> None:
     db.set_manual_day_type(conn, morning_key, day_type, 111, _PAST_ISO_UTC)
 
 
-def test_job_autopublish_publishes_when_enabled(conn, config, texts, thresholds):
+def test_is_calendar_weekend():
+    assert scheduler.is_calendar_weekend(date(2026, 9, 26)) is True  # субота
+    assert scheduler.is_calendar_weekend(date(2026, 9, 27)) is True  # неділя
+    assert scheduler.is_calendar_weekend(date(2026, 9, 28)) is False  # понеділок
+    assert scheduler.is_calendar_weekend(date(2026, 10, 2)) is False  # п'ятниця
+
+
+def test_job_autopublish_publishes_when_enabled(conn, config, texts, thresholds, monkeypatch):
+    monkeypatch.setattr(scheduler, "is_calendar_weekend", lambda _d: False)
     enabled_config = replace(config, auto_publish_enabled=True)
     context = make_context(conn, enabled_config, texts=texts, thresholds=thresholds)
     asyncio.run(scheduler.generate_and_send_preview(context, force=True))
     morning_key = date.today().isoformat()
-    _mark_day(conn, morning_key, "workday")
     _force_triggered(conn, morning_key)
     context.bot.send_message.reset_mock()
 
@@ -504,15 +511,18 @@ def test_job_autopublish_publishes_when_enabled(conn, config, texts, thresholds)
     assert row["mode"] == "auto"
 
 
-def test_job_autopublish_only_reminds_on_weekend_even_when_enabled(conn, config, texts, thresholds):
-    """Вихідний (субота/неділя або /markweekend) — важка ніч без реакції
-    НЕ публікується автоматично навіть з AUTO_PUBLISH_ENABLED=true, лише
-    нагадування адмінам; рішення за людиною."""
+def test_job_autopublish_only_reminds_on_weekend_even_when_enabled(
+    conn, config, texts, thresholds, monkeypatch
+):
+    """Субота/неділя — важка ніч без реакції НЕ публікується автоматично
+    навіть з AUTO_PUBLISH_ENABLED=true, лише нагадування адмінам. Ручна
+    позначка /markworkday на вихідний це НЕ змінює."""
+    monkeypatch.setattr(scheduler, "is_calendar_weekend", lambda _d: True)
     enabled_config = replace(config, auto_publish_enabled=True)
     context = make_context(conn, enabled_config, texts=texts, thresholds=thresholds)
     asyncio.run(scheduler.generate_and_send_preview(context, force=True))
     morning_key = date.today().isoformat()
-    _mark_day(conn, morning_key, "weekend")
+    _mark_day(conn, morning_key, "workday")
     _force_triggered(conn, morning_key)
     context.bot.send_message.reset_mock()
 
@@ -522,6 +532,24 @@ def test_job_autopublish_only_reminds_on_weekend_even_when_enabled(conn, config,
     chat_ids = {call.kwargs["chat_id"] for call in context.bot.send_message.await_args_list}
     assert chat_ids == set(enabled_config.admin_user_ids)
     assert conn.execute("SELECT COUNT(*) FROM send_log").fetchone()[0] == 0
+
+
+def test_job_autopublish_publishes_on_weekday_marked_weekend(
+    conn, config, texts, thresholds, monkeypatch
+):
+    """Будній день, позначений /markweekend (свято), — автопублікація
+    працює: обмеження стосується лише календарних суботи й неділі."""
+    monkeypatch.setattr(scheduler, "is_calendar_weekend", lambda _d: False)
+    enabled_config = replace(config, auto_publish_enabled=True)
+    context = make_context(conn, enabled_config, texts=texts, thresholds=thresholds)
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True))
+    morning_key = date.today().isoformat()
+    _mark_day(conn, morning_key, "weekend")
+    _force_triggered(conn, morning_key)
+
+    asyncio.run(scheduler.job_autopublish(context))
+
+    assert db.get_preview(conn, morning_key)["status"] == "auto_sent"
 
 
 def test_job_autopublish_noop_without_pending_preview(conn, config, texts, thresholds):

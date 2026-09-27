@@ -59,6 +59,12 @@ def determine_day_type(conn, morning_date: date) -> str:
     return "weekend" if morning_date.weekday() >= 5 else "workday"
 
 
+def is_calendar_weekend(morning_date: date) -> bool:
+    """Календарні субота/неділя — БЕЗ урахування ручних позначок
+    /markweekend і /markworkday (на відміну від `determine_day_type`)."""
+    return morning_date.weekday() >= 5
+
+
 def _pending_keyboard(morning_date: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -378,9 +384,10 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
     2026-09-24) бот публікує сам; з `=false` — лише нагадування адмінам
     (ручний режим тестового періоду, ТЗ п.13).
 
-    Вихідний день (`determine_day_type` — субота/неділя або вручну
-    позначений /markweekend; /markworkday знімає обмеження) — бот НЕ
-    публікує сам навіть з прапорцем, лише нагадує адмінам (2026-09-27):
+    Субота й неділя (`is_calendar_weekend` — лише календар; ручні
+    /markweekend і /markworkday тут НЕ враховуються, вони впливають лише
+    на набір текстів) — бот НЕ публікує сам навіть з прапорцем, лише
+    нагадує адмінам (2026-09-27):
     у вихідні рішення лишається за людиною — адмін може змінити текст,
     обрати інший варіант чи надіслати вручну.
 
@@ -403,9 +410,9 @@ async def job_autopublish(context: ContextTypes.DEFAULT_TYPE) -> None:
     if preview["status"] != "pending" or not preview["triggered"]:
         return
 
-    if determine_day_type(conn, date.fromisoformat(morning_key)) == "weekend":
+    if is_calendar_weekend(date.fromisoformat(morning_key)):
         note = (
-            "⏰ Прев'ю на сьогодні досі без реакції. Сьогодні вихідний — "
+            "⏰ Прев'ю на сьогодні досі без реакції. Сьогодні субота/неділя — "
             "автопублікація не виконується. Натисніть кнопку вище, щоб "
             "надіслати вручну, або викличте /support."
         )
