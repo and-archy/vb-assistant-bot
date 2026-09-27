@@ -504,9 +504,7 @@ def test_job_autopublish_publishes_when_enabled(conn, config, texts, thresholds)
     assert row["mode"] == "auto"
 
 
-def test_job_autopublish_only_reminds_on_weekend_even_when_enabled(
-    conn, config, texts, thresholds
-):
+def test_job_autopublish_only_reminds_on_weekend_even_when_enabled(conn, config, texts, thresholds):
     """Вихідний (субота/неділя або /markweekend) — важка ніч без реакції
     НЕ публікується автоматично навіть з AUTO_PUBLISH_ENABLED=true, лише
     нагадування адмінам; рішення за людиною."""
