@@ -10,7 +10,9 @@ def make_message(text=None):
 
 def make_update(user_id=111, text=None, args=None, callback_data=None, chat_type="private"):
     update = MagicMock()
-    update.effective_user = MagicMock(id=user_id)
+    update.effective_user = MagicMock(
+        id=user_id, username=f"admin{user_id}", full_name=f"Admin {user_id}"
+    )
     update.effective_chat = MagicMock(type=chat_type)
     if callback_data is not None:
         message = make_message()
@@ -40,4 +42,5 @@ def make_context(conn, config, texts=None, thresholds=None, args=None, user_data
     context.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1))
     context.bot.edit_message_reply_markup = AsyncMock()
     context.bot.edit_message_text = AsyncMock()
+    context.bot.get_me = AsyncMock()
     return context

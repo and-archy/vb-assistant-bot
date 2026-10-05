@@ -602,3 +602,90 @@ def test_job_publish_queued_reschedules_when_publish_keeps_failing(conn, config,
         if "Не вдалося" in call.kwargs.get("text", "")
     ]
     assert len(warn_calls) == len(config.admin_user_ids)
+
+
+def _edited_texts(context) -> list[str]:
+    return [kwargs["text"] for _, kwargs in context.bot.edit_message_text.await_args_list]
+
+
+def test_skip_view_shows_which_admin_skipped(conn, config, texts, thresholds):
+    db.upsert_admin_name(conn, 222, "admin2", "2026-01-01T00:00:00+00:00")
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True))
+    morning_key = date.today().isoformat()
+
+    update = make_update(user_id=222, callback_data=f"prev:{morning_key}:skip")
+    asyncio.run(scheduler.on_preview_action(update, context))
+
+    texts_sent = _edited_texts(context)
+    assert len(texts_sent) == len(config.admin_user_ids)
+    for text in texts_sent:
+        assert text.endswith("Пропущено — нічого не буде опубліковано в General. (admin2)")
+
+
+def test_more_view_shows_which_admin_changed_variant(conn, config, texts, thresholds):
+    db.upsert_admin_name(conn, 111, "admin1", "2026-01-01T00:00:00+00:00")
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True))
+    morning_key = date.today().isoformat()
+
+    update = make_update(user_id=111, callback_data=f"prev:{morning_key}:more")
+    asyncio.run(scheduler.on_preview_action(update, context))
+
+    for text in _edited_texts(context):
+        assert "Інший варіант обрав: admin1" in text
+
+
+def test_support_preview_shows_requesting_admin(conn, config, texts, thresholds):
+    db.upsert_admin_name(conn, 222, "admin2", "2026-01-01T00:00:00+00:00")
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True, requested_by=222))
+
+    for _, kwargs in context.bot.send_message.await_args_list:
+        assert "Прев'ю запитав: admin2" in kwargs["text"]
+
+
+def test_daily_preview_has_no_actor_line(conn, config, texts, thresholds):
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+
+    asyncio.run(scheduler.generate_and_send_preview(context, force=False))
+
+    for _, kwargs in context.bot.send_message.await_args_list:
+        assert "запитав" not in kwargs["text"]
+
+
+def test_queued_and_published_views_show_admin(conn, config, texts, thresholds):
+    db.upsert_admin_name(conn, 111, "admin1", "2026-01-01T00:00:00+00:00")
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True))
+    morning_key = date.today().isoformat()
+
+    update = make_update(user_id=111, callback_data=f"prev:{morning_key}:send_now")
+    asyncio.run(scheduler.on_preview_action(update, context))
+
+    texts_sent = _edited_texts(context)
+    assert any("(admin1):" in t and "Заплановано" in t for t in texts_sent)
+    assert "Опубліковано в General (admin1):" in texts_sent[-1]
+
+
+def test_autopublished_view_marks_bot_as_actor(conn, config, texts, thresholds):
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True))
+    morning_key = date.today().isoformat()
+    preview = db.get_preview(conn, morning_key)
+
+    asyncio.run(
+        scheduler._publish_and_resolve(
+            context,
+            conn,
+            morning_key,
+            preview,
+            status="auto_sent",
+            mode="auto",
+            sent_by=None,
+            retry_job=scheduler.job_autopublish,
+        )
+    )
+
+    assert "Опубліковано в General (автопублікація):" in _edited_texts(context)[-1]

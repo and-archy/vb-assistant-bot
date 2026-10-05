@@ -7,7 +7,7 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from vb_assistant_bot import db
-from vb_assistant_bot.access import ensure_admin
+from vb_assistant_bot.access import admin_label, ensure_admin
 from vb_assistant_bot.config import Config
 
 logger = logging.getLogger(__name__)
@@ -41,14 +41,26 @@ def _local_label(scheduled_at_utc_iso: str, timezone: str) -> str:
     return dt.strftime(_DATETIME_FORMAT)
 
 
-def _view(row, timezone: str) -> tuple[str, InlineKeyboardMarkup]:
+def _authors(conn, row) -> str:
+    """« (автор, змінив інший)» — хто з адмінів створив і хто востаннє
+    змінив/скасував повідомлення."""
+    parts = [admin_label(conn, row["created_by"])]
+    editor = admin_label(conn, row["updated_by"])
+    if editor:
+        verb = "скасував" if row["status"] == "cancelled" else "змінив"
+        parts.append(f"{verb} {editor}")
+    return f" ({', '.join(p for p in parts if p)})"
+
+
+def _view(conn, row, timezone: str) -> tuple[str, InlineKeyboardMarkup]:
     when = _local_label(row["scheduled_at"], timezone)
+    who = _authors(conn, row)
     if row["status"] == "scheduled":
-        body = f"📝 Заплановане повідомлення на {when}:\n\n{row['text']}"
+        body = f"📝 Заплановане повідомлення на {when}{who}:\n\n{row['text']}"
         return body, _keyboard(row["id"])
     if row["status"] == "cancelled":
-        return f"📝 Скасовано (мало піти о {when}):\n\n{row['text']}", _EMPTY_KEYBOARD
-    return f"✅ Опубліковано о {when}:\n\n{row['text']}", _EMPTY_KEYBOARD
+        return f"📝 Скасовано (мало піти о {when}){who}:\n\n{row['text']}", _EMPTY_KEYBOARD
+    return f"✅ Опубліковано о {when}{who}:\n\n{row['text']}", _EMPTY_KEYBOARD
 
 
 def _parse_datetime(text: str, timezone: str) -> datetime | None:
@@ -67,7 +79,7 @@ async def _broadcast(context: ContextTypes.DEFAULT_TYPE, custom_message_id: int)
     row = db.get_custom_message(conn, custom_message_id)
     if row is None:
         return
-    body, keyboard = _view(row, config.timezone)
+    body, keyboard = _view(conn, row, config.timezone)
     existing = {
         r["chat_id"]: r["message_id"] for r in db.custom_message_previews(conn, custom_message_id)
     }
@@ -178,7 +190,9 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if step == "await_edit_text":
         custom_message_id = context.user_data[_EDIT_ID_KEY]
         _clear_state(context)
-        db.update_custom_message_text(conn, custom_message_id, text, now_utc)
+        db.update_custom_message_text(
+            conn, custom_message_id, text, now_utc, update.effective_user.id
+        )
         await _broadcast(context, custom_message_id)
         await update.effective_message.reply_text("Текст оновлено.")
         return
@@ -193,7 +207,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         custom_message_id = context.user_data[_EDIT_ID_KEY]
         _clear_state(context)
         db.update_custom_message_time(
-            conn, custom_message_id, parsed.astimezone(UTC).isoformat(), now_utc
+            conn,
+            custom_message_id,
+            parsed.astimezone(UTC).isoformat(),
+            now_utc,
+            update.effective_user.id,
         )
         await _broadcast(context, custom_message_id)
         await update.effective_message.reply_text(
@@ -218,7 +236,7 @@ async def on_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if row is None or row["status"] != "scheduled":
         await query.answer("Вже оброблено")
         if row is not None:
-            body, keyboard = _view(row, config.timezone)
+            body, keyboard = _view(conn, row, config.timezone)
             try:
                 await query.edit_message_text(body, reply_markup=keyboard)
             except TelegramError:
@@ -227,7 +245,7 @@ async def on_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if action == "cancel":
         db.set_custom_message_status(
-            conn, custom_message_id, "cancelled", datetime.now(UTC).isoformat()
+            conn, custom_message_id, "cancelled", datetime.now(UTC).isoformat(), user.id
         )
         await query.answer("Скасовано")
         await _broadcast(context, custom_message_id)

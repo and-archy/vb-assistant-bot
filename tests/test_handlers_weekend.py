@@ -46,3 +46,14 @@ def test_mark_weekend_denies_non_admin(conn, config):
     asyncio.run(weekend.mark_weekend(update, context))
     assert db.get_manual_day_type(conn, "2026-12-25") is None
     update.effective_message.reply_text.assert_awaited_once_with("Немає доступу.")
+
+
+def test_mark_weekend_notifies_other_admins_with_actor_name(conn, config):
+    update = make_update(user_id=111)
+    context = make_context(conn, config, args=["25.12.2026"])
+
+    asyncio.run(weekend.mark_weekend(update, context))
+
+    reply = update.effective_message.reply_text.await_args.args[0]
+    assert reply == "📅 25.12.2026 позначено як вихідний день (admin111)."
+    context.bot.send_message.assert_awaited_once_with(chat_id=222, text=reply)

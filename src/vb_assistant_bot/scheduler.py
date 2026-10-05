@@ -11,6 +11,7 @@ from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
 
 from vb_assistant_bot import db, deck
+from vb_assistant_bot.access import admin_label
 from vb_assistant_bot.alerts_client import AlertsInUaClient
 from vb_assistant_bot.config import Config
 from vb_assistant_bot.content import Texts, Thresholds
@@ -107,28 +108,54 @@ def _send_time_keyboard(morning_date: str, fixed_label: str) -> InlineKeyboardMa
     )
 
 
-def _pending_body(preview) -> str:
-    return f"{preview['stats_intro']}\n\nГотовий текст:\n{preview['message_text']}"
+# Підпис останньої дії адміна над pending-прев'ю (preview_state.actor_action).
+_ACTOR_ACTION_LABELS = {
+    "support": "🌅 Прев'ю запитав",
+    "more": "🔄 Інший варіант обрав",
+    "calm": "🕊 Стриманий тон обрав",
+    "cancel": "↩️ Публікацію скасував",
+}
 
 
-def _send_time_body(preview) -> str:
-    return f"{_pending_body(preview)}\n\nКоли відправити?"
+def _by(conn, user_id: int | None) -> str:
+    """Суфікс « (нікнейм)» — хто з адмінів виконав дію; порожній, якщо
+    дію виконав сам бот."""
+    name = admin_label(conn, user_id)
+    return f" ({name})" if name else ""
 
 
-def _queued_body(preview, timezone: str) -> str:
+def _pending_body(conn, preview) -> str:
+    body = f"{preview['stats_intro']}\n\nГотовий текст:\n{preview['message_text']}"
+    label = _ACTOR_ACTION_LABELS.get(preview["actor_action"] or "")
+    name = admin_label(conn, preview["actor_id"])
+    if label and name:
+        body += f"\n\n{label}: {name}"
+    return body
+
+
+def _send_time_body(conn, preview) -> str:
+    return f"{_pending_body(conn, preview)}\n\nКоли відправити?"
+
+
+def _queued_body(conn, preview, timezone: str) -> str:
     return (
         f"{preview['stats_intro']}\n\n"
-        f"📤 Заплановано до публікації о {_scheduled_label(preview, timezone)}:"
+        f"📤 Заплановано до публікації о {_scheduled_label(preview, timezone)}"
+        f"{_by(conn, preview['resolved_by'])}:"
         f"\n{preview['message_text']}"
     )
 
 
-def _skipped_body(preview) -> str:
-    return f"{preview['stats_intro']}\n\n⏭ Пропущено — нічого не буде опубліковано в General."
+def _skipped_body(conn, preview) -> str:
+    return (
+        f"{preview['stats_intro']}\n\n⏭ Пропущено — нічого не буде опубліковано в General."
+        f"{_by(conn, preview['resolved_by'])}"
+    )
 
 
-def _published_body(preview) -> str:
-    return f"{preview['stats_intro']}\n\n✅ Опубліковано в General:\n{preview['message_text']}"
+def _published_body(conn, preview) -> str:
+    who = _by(conn, preview["resolved_by"]) or " (автопублікація)"
+    return f"{preview['stats_intro']}\n\n✅ Опубліковано в General{who}:\n{preview['message_text']}"
 
 
 def _format_time(value: time) -> str:
@@ -150,16 +177,16 @@ def _parse_hhmm_input(text: str) -> time | None:
     return time(int(match.group(1)), int(match.group(2)))
 
 
-def _view_for(preview, morning_key: str, timezone: str) -> tuple[str, InlineKeyboardMarkup]:
+def _view_for(conn, preview, morning_key: str, timezone: str) -> tuple[str, InlineKeyboardMarkup]:
     status = preview["status"]
     if status == "pending":
-        return _pending_body(preview), _pending_keyboard(morning_key)
+        return _pending_body(conn, preview), _pending_keyboard(morning_key)
     if status == "queued":
-        return _queued_body(preview, timezone), _queued_keyboard(morning_key)
+        return _queued_body(conn, preview, timezone), _queued_keyboard(morning_key)
     if status == "skipped":
-        return _skipped_body(preview), _EMPTY_KEYBOARD
+        return _skipped_body(conn, preview), _EMPTY_KEYBOARD
     if status in ("published", "auto_sent"):
-        return _published_body(preview), _EMPTY_KEYBOARD
+        return _published_body(conn, preview), _EMPTY_KEYBOARD
     return preview["message_text"], _EMPTY_KEYBOARD
 
 
@@ -290,7 +317,7 @@ async def poll_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def generate_and_send_preview(
-    context: ContextTypes.DEFAULT_TYPE, *, force: bool
+    context: ContextTypes.DEFAULT_TYPE, *, force: bool, requested_by: int | None = None
 ) -> PreviewResult:
     """Формує й шле прев'ю в особисті всім адмінам — БЕЗУМОВНО (з 2026-09-17,
     після інциденту з мовчазним провалом: масований обстріл не пробив
@@ -300,7 +327,10 @@ async def generate_and_send_preview(
 
     force=False (щоденна джоба) — якщо на сьогодні прев'ю вже
     оброблено (не `pending`), не дублює. force=True (`/support`) —
-    завжди перегенеровує, ігноруючи попереднє рішення."""
+    завжди перегенеровує, ігноруючи попереднє рішення.
+
+    requested_by — id адміна, що викликав /support (показується іншим
+    адмінам у прев'ю); None — щоденна джоба."""
     conn = context.bot_data["conn"]
     config: Config = context.bot_data["config"]
     texts: Texts = context.bot_data["texts"]
@@ -342,10 +372,12 @@ async def generate_and_send_preview(
         stats_intro=format_stats_summary(stats, triggered),
         triggered=triggered,
         created_at=datetime.now(UTC).isoformat(),
+        actor_id=requested_by,
+        actor_action="support" if requested_by is not None else None,
     )
 
     preview = db.get_preview(conn, morning_key)
-    body, keyboard = _view_for(preview, morning_key, config.timezone)
+    body, keyboard = _view_for(conn, preview, morning_key, config.timezone)
     sent_to = 0
     for admin_id in config.admin_user_ids:
         try:
@@ -559,7 +591,7 @@ async def _broadcast_current_view(
     preview = db.get_preview(conn, morning_key)
     if preview is None:
         return
-    body, keyboard = _view_for(preview, morning_key, config.timezone)
+    body, keyboard = _view_for(conn, preview, morning_key, config.timezone)
     for row in db.preview_messages(conn, morning_key):
         try:
             await context.bot.edit_message_text(
@@ -595,7 +627,7 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
     if not valid:
         await query.answer("Вже оброблено")
-        body, keyboard = _view_for(preview, morning_key, config.timezone)
+        body, keyboard = _view_for(conn, preview, morning_key, config.timezone)
         try:
             await query.edit_message_text(body, reply_markup=keyboard)
         except TelegramError:
@@ -610,7 +642,7 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await query.answer()
         try:
             await query.edit_message_text(
-                _send_time_body(preview),
+                _send_time_body(conn, preview),
                 reply_markup=_send_time_keyboard(morning_key, fixed_label),
             )
         except TelegramError:
@@ -659,6 +691,7 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if action == "cancel":
         db.resolve_preview(conn, morning_key, "pending", None, None)
+        db.set_preview_actor(conn, morning_key, user.id, "cancel")
         await query.answer("Скасовано — оберіть варіант і надішліть знову")
         await _broadcast_current_view(context, conn, morning_key)
         return
@@ -681,6 +714,7 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             variant_id=variant.id,
             message_text=message_text,
         )
+        db.set_preview_actor(conn, morning_key, user.id, action)
         await query.answer()
         await _broadcast_current_view(context, conn, morning_key)
         return

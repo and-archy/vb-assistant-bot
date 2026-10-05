@@ -19,7 +19,9 @@ async def support(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     try:
-        result = await scheduler.generate_and_send_preview(context, force=True)
+        result = await scheduler.generate_and_send_preview(
+            context, force=True, requested_by=update.effective_user.id
+        )
     except Exception:
         logger.exception("/support: не вдалося сформувати прев'ю")
         await update.effective_message.reply_text(

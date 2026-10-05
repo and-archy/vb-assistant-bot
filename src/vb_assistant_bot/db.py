@@ -52,7 +52,11 @@ CREATE TABLE IF NOT EXISTS preview_state (
     created_at    TEXT NOT NULL,
     resolved_at   TEXT,
     resolved_by   INTEGER,
-    scheduled_at  TEXT   -- канонічний UTC ISO8601, лише для status='queued'
+    scheduled_at  TEXT,  -- канонічний UTC ISO8601, лише для status='queued'
+    -- Хто з адмінів востаннє змінив pending-прев'ю (support/more/calm/cancel)
+    -- — для рядка "хто виконав дію" у вигляді прев'ю.
+    actor_id      INTEGER,
+    actor_action  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS preview_messages (
@@ -83,7 +87,17 @@ CREATE TABLE IF NOT EXISTS custom_messages (
     created_by        INTEGER NOT NULL,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
-    sent_at           TEXT
+    sent_at           TEXT,
+    updated_by        INTEGER   -- хто востаннє змінив текст/час або скасував
+);
+
+-- Останній відомий нікнейм адміна (username, інакше повне ім'я) — щоб
+-- у спільних повідомленнях бота показувати, ХТО з адмінів виконав дію.
+-- Оновлюється на кожному апдейті від адміна (access.remember_admin).
+CREATE TABLE IF NOT EXISTS admin_names (
+    user_id     INTEGER PRIMARY KEY,
+    name        TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS custom_message_previews (
@@ -119,6 +133,12 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE alerts ADD COLUMN alert_level TEXT")
     if not _column_exists(conn, "preview_state", "scheduled_at"):
         conn.execute("ALTER TABLE preview_state ADD COLUMN scheduled_at TEXT")
+    if not _column_exists(conn, "preview_state", "actor_id"):
+        conn.execute("ALTER TABLE preview_state ADD COLUMN actor_id INTEGER")
+    if not _column_exists(conn, "preview_state", "actor_action"):
+        conn.execute("ALTER TABLE preview_state ADD COLUMN actor_action TEXT")
+    if not _column_exists(conn, "custom_messages", "updated_by"):
+        conn.execute("ALTER TABLE custom_messages ADD COLUMN updated_by INTEGER")
     conn.commit()
     return conn
 
@@ -261,14 +281,16 @@ def upsert_preview(
     stats_intro: str,
     triggered: bool,
     created_at: str,
+    actor_id: int | None = None,
+    actor_action: str | None = None,
 ) -> None:
     conn.execute(
         """
         INSERT INTO preview_state
             (morning_date, status, day_type, variant_set, variant_id,
              message_text, stats_json, stats_intro, triggered, created_at,
-             resolved_at, resolved_by, scheduled_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+             resolved_at, resolved_by, scheduled_at, actor_id, actor_action)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)
         ON CONFLICT (morning_date) DO UPDATE SET
             status = excluded.status,
             day_type = excluded.day_type,
@@ -281,7 +303,9 @@ def upsert_preview(
             created_at = excluded.created_at,
             resolved_at = NULL,
             resolved_by = NULL,
-            scheduled_at = NULL
+            scheduled_at = NULL,
+            actor_id = excluded.actor_id,
+            actor_action = excluded.actor_action
         """,
         (
             morning_date,
@@ -294,6 +318,8 @@ def upsert_preview(
             stats_intro,
             int(triggered),
             created_at,
+            actor_id,
+            actor_action,
         ),
     )
     conn.execute("DELETE FROM preview_messages WHERE morning_date = ?", (morning_date,))
@@ -340,6 +366,16 @@ def resolve_preview(
         WHERE morning_date = ?
         """,
         (status, resolved_by, resolved_at, scheduled_at, morning_date),
+    )
+    conn.commit()
+
+
+def set_preview_actor(
+    conn: sqlite3.Connection, morning_date: str, actor_id: int | None, actor_action: str | None
+) -> None:
+    conn.execute(
+        "UPDATE preview_state SET actor_id = ?, actor_action = ? WHERE morning_date = ?",
+        (actor_id, actor_action, morning_date),
     )
     conn.commit()
 
@@ -428,31 +464,43 @@ def get_custom_message(conn: sqlite3.Connection, custom_message_id: int) -> sqli
 
 
 def update_custom_message_text(
-    conn: sqlite3.Connection, custom_message_id: int, text: str, updated_at: str
+    conn: sqlite3.Connection,
+    custom_message_id: int,
+    text: str,
+    updated_at: str,
+    updated_by: int | None = None,
 ) -> None:
     conn.execute(
-        "UPDATE custom_messages SET text = ?, updated_at = ? WHERE id = ?",
-        (text, updated_at, custom_message_id),
+        "UPDATE custom_messages SET text = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+        (text, updated_at, updated_by, custom_message_id),
     )
     conn.commit()
 
 
 def update_custom_message_time(
-    conn: sqlite3.Connection, custom_message_id: int, scheduled_at: str, updated_at: str
+    conn: sqlite3.Connection,
+    custom_message_id: int,
+    scheduled_at: str,
+    updated_at: str,
+    updated_by: int | None = None,
 ) -> None:
     conn.execute(
-        "UPDATE custom_messages SET scheduled_at = ?, updated_at = ? WHERE id = ?",
-        (scheduled_at, updated_at, custom_message_id),
+        "UPDATE custom_messages SET scheduled_at = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+        (scheduled_at, updated_at, updated_by, custom_message_id),
     )
     conn.commit()
 
 
 def set_custom_message_status(
-    conn: sqlite3.Connection, custom_message_id: int, status: str, updated_at: str
+    conn: sqlite3.Connection,
+    custom_message_id: int,
+    status: str,
+    updated_at: str,
+    updated_by: int | None = None,
 ) -> None:
     conn.execute(
-        "UPDATE custom_messages SET status = ?, updated_at = ? WHERE id = ?",
-        (status, updated_at, custom_message_id),
+        "UPDATE custom_messages SET status = ?, updated_at = ?, updated_by = ? WHERE id = ?",
+        (status, updated_at, updated_by, custom_message_id),
     )
     conn.commit()
 
@@ -493,3 +541,27 @@ def custom_message_previews(conn: sqlite3.Connection, custom_message_id: int) ->
         "SELECT chat_id, message_id FROM custom_message_previews WHERE custom_message_id = ?",
         (custom_message_id,),
     ).fetchall()
+
+
+# --- admin names ------------------------------------------------------------------
+
+
+def upsert_admin_name(conn: sqlite3.Connection, user_id: int, name: str, updated_at: str) -> None:
+    """Пише лише коли ім'я змінилось — викликається на КОЖНОМУ апдейті від
+    адміна, тож без цієї перевірки був би commit на кожне натискання."""
+    row = conn.execute("SELECT name FROM admin_names WHERE user_id = ?", (user_id,)).fetchone()
+    if row is not None and row["name"] == name:
+        return
+    conn.execute(
+        """
+        INSERT INTO admin_names (user_id, name, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT (user_id) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at
+        """,
+        (user_id, name, updated_at),
+    )
+    conn.commit()
+
+
+def get_admin_name(conn: sqlite3.Connection, user_id: int) -> str | None:
+    row = conn.execute("SELECT name FROM admin_names WHERE user_id = ?", (user_id,)).fetchone()
+    return row["name"] if row else None

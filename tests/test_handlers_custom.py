@@ -210,3 +210,47 @@ def test_job_dispatch_skips_future_messages(conn, config):
 
     assert db.get_custom_message(conn, custom_id)["status"] == "scheduled"
     context.bot.send_message.assert_not_called()
+
+
+def test_view_shows_author_and_who_cancelled(conn, config):
+    db.upsert_admin_name(conn, 111, "admin1", "2026-01-01T00:00:00+00:00")
+    db.upsert_admin_name(conn, 222, "admin2", "2026-01-01T00:00:00+00:00")
+    context = make_context(conn, config)
+    custom_id = _create_scheduled(conn)
+    db.add_custom_message_preview(conn, custom_id, 111, 10)
+    db.add_custom_message_preview(conn, custom_id, 222, 20)
+
+    update = make_update(user_id=222, callback_data=f"custom:{custom_id}:cancel")
+    asyncio.run(custom.on_action(update, context))
+
+    assert db.get_custom_message(conn, custom_id)["updated_by"] == 222
+    for _, kwargs in context.bot.edit_message_text.await_args_list:
+        assert "(admin1, скасував admin2)" in kwargs["text"]
+
+
+def test_view_shows_who_edited_text(conn, config):
+    db.upsert_admin_name(conn, 111, "admin1", "2026-01-01T00:00:00+00:00")
+    db.upsert_admin_name(conn, 222, "admin2", "2026-01-01T00:00:00+00:00")
+    context = make_context(conn, config)
+    custom_id = _create_scheduled(conn)
+
+    asyncio.run(
+        custom.on_action(
+            make_update(user_id=222, callback_data=f"custom:{custom_id}:edit_text"), context
+        )
+    )
+    asyncio.run(custom.on_text(make_update(user_id=222, text="новий"), context))
+
+    texts_sent = [kwargs["text"] for _, kwargs in context.bot.send_message.await_args_list]
+    assert any("(admin1, змінив admin2)" in t for t in texts_sent)
+
+
+def test_new_message_view_shows_author(conn, config):
+    context = make_context(conn, config)
+    db.upsert_admin_name(conn, 111, "admin1", "2026-01-01T00:00:00+00:00")
+    asyncio.run(custom.start(make_update(user_id=111), context))
+    asyncio.run(custom.on_text(make_update(user_id=111, text="текст"), context))
+    asyncio.run(custom.on_text(make_update(user_id=111, text=_FUTURE), context))
+
+    for _, kwargs in context.bot.send_message.await_args_list:
+        assert "(admin1):" in kwargs["text"]

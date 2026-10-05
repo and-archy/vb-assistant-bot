@@ -1,12 +1,16 @@
+import logging
 from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
 from telegram import Update
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from vb_assistant_bot import db
-from vb_assistant_bot.access import ensure_admin
+from vb_assistant_bot.access import display_name, ensure_admin
 from vb_assistant_bot.config import Config
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_date_arg(args: list[str], timezone: str) -> date | None:
@@ -31,13 +35,22 @@ async def _set_day_type(update: Update, context: ContextTypes.DEFAULT_TYPE, day_
         return
 
     conn = context.bot_data["conn"]
+    user = update.effective_user
     db.set_manual_day_type(
-        conn, target.isoformat(), day_type, update.effective_user.id, datetime.now(UTC).isoformat()
+        conn, target.isoformat(), day_type, user.id, datetime.now(UTC).isoformat()
     )
     label = "вихідний" if day_type == "weekend" else "робочий"
-    await update.effective_message.reply_text(
-        f"{target.strftime('%d.%m.%Y')} позначено як {label} день."
-    )
+    text = f"📅 {target.strftime('%d.%m.%Y')} позначено як {label} день ({display_name(user)})."
+    await update.effective_message.reply_text(text)
+    # Решті адмінів — щоб бачили, хто змінив тип дня (впливає на набір
+    # текстів ранкового прев'ю).
+    for admin_id in config.admin_user_ids:
+        if admin_id == user.id:
+            continue
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text)
+        except TelegramError as exc:
+            logger.error("Не вдалося сповістити адміна %s про зміну типу дня: %s", admin_id, exc)
 
 
 async def mark_weekend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

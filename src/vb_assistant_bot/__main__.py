@@ -10,10 +10,12 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
-from vb_assistant_bot import db, scheduler
+from vb_assistant_bot import db, health, scheduler
+from vb_assistant_bot.access import remember_admin
 from vb_assistant_bot.alerts_client import AlertsInUaClient
 from vb_assistant_bot.config import Config, load_config
 from vb_assistant_bot.content import load_texts, load_thresholds
@@ -43,10 +45,11 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     логувалась і зникала — жоден адмін не дізнавався, що бот щось не
     зробив (інцидент 2026-09-17: /support мовчав при збої)."""
     logger.error("Необроблена помилка при обробці %s", update, exc_info=context.error)
+    health.record_error(context.bot_data)
     config: Config | None = context.bot_data.get("config")
     if config is None:
         return
-    text = f"⚠️ Помилка в боті: {context.error}"
+    text = f"⚠️ Помилка в боті: {context.error}\nПовідомлю, коли бот повернеться до штатної роботи."
     for admin_id in config.admin_user_ids:
         try:
             await context.bot.send_message(chat_id=admin_id, text=text)
@@ -68,6 +71,9 @@ def main() -> None:
     application.bot_data["thresholds"] = thresholds
     application.bot_data["alerts_client"] = AlertsInUaClient(config.alerts_api_token)
 
+    # Група -1 — перед усіма: запам'ятовує нікнейм адміна для рядків
+    # «хто виконав дію» (не зупиняє обробку в інших групах).
+    application.add_handler(TypeHandler(Update, remember_admin), group=-1)
     application.add_handler(CommandHandler("start", menu.start))
     application.add_handler(CommandHandler("help", menu.help_command))
     application.add_handler(CommandHandler("support", support.support))
@@ -92,6 +98,11 @@ def main() -> None:
     application.add_error_handler(on_error)
 
     scheduler.register(application, config, thresholds)
+    application.job_queue.run_repeating(
+        health.job_check_recovery,
+        interval=health.CHECK_INTERVAL_SECONDS,
+        first=health.CHECK_INTERVAL_SECONDS,
+    )
 
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
