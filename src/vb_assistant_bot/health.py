@@ -31,6 +31,11 @@ def record_error(bot_data: dict, now: datetime | None = None) -> None:
     state["count"] += 1
 
 
+def error_state(bot_data: dict) -> dict | None:
+    """Поточна серія помилок (для «📋 Статус») або None."""
+    return bot_data.get(_ERROR_STATE_KEY)
+
+
 def _format_local(value: datetime, timezone: str) -> str:
     local = value.astimezone(ZoneInfo(timezone))
     return f"{local.hour}:{local.minute:02d}"

@@ -689,3 +689,21 @@ def test_autopublished_view_marks_bot_as_actor(conn, config, texts, thresholds):
     )
 
     assert "Опубліковано в General (автопублікація):" in _edited_texts(context)[-1]
+
+
+def test_preview_actions_are_logged_to_history(conn, config, texts, thresholds):
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    asyncio.run(scheduler.generate_and_send_preview(context, force=True, requested_by=111))
+    morning_key = date.today().isoformat()
+
+    asyncio.run(
+        scheduler.on_preview_action(
+            make_update(user_id=222, callback_data=f"prev:{morning_key}:skip"), context
+        )
+    )
+
+    rows = db.recent_actions(conn, "2000-01-01", 10)
+    assert [(r["user_id"], r["action"]) for r in rows] == [
+        (222, "пропустив ранкове прев'ю"),
+        (111, "сформував ранкове прев'ю вручну"),
+    ]

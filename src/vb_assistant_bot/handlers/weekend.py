@@ -6,7 +6,7 @@ from telegram import Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from vb_assistant_bot import db
+from vb_assistant_bot import audit, db
 from vb_assistant_bot.access import display_name, ensure_admin
 from vb_assistant_bot.config import Config
 
@@ -41,6 +41,7 @@ async def _set_day_type(update: Update, context: ContextTypes.DEFAULT_TYPE, day_
     )
     label = "вихідний" if day_type == "weekend" else "робочий"
     text = f"📅 {target.strftime('%d.%m.%Y')} позначено як {label} день ({display_name(user)})."
+    audit.log(conn, user.id, f"позначив {target.strftime('%d.%m.%Y')} як {label} день")
     await update.effective_message.reply_text(text)
     # Решті адмінів — щоб бачили, хто змінив тип дня (впливає на набір
     # текстів ранкового прев'ю).

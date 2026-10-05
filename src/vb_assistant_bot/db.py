@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS preview_state (
     -- Хто з адмінів востаннє змінив pending-прев'ю (support/more/calm/cancel)
     -- — для рядка "хто виконав дію" у вигляді прев'ю.
     actor_id      INTEGER,
-    actor_action  TEXT
+    actor_action  TEXT,
+    group_message_id INTEGER  -- id опублікованого повідомлення в General
 );
 
 CREATE TABLE IF NOT EXISTS preview_messages (
@@ -88,7 +89,9 @@ CREATE TABLE IF NOT EXISTS custom_messages (
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
     sent_at           TEXT,
-    updated_by        INTEGER   -- хто востаннє змінив текст/час або скасував
+    updated_by        INTEGER,  -- хто востаннє змінив текст/час або скасував
+    group_message_id  INTEGER,  -- id опублікованого повідомлення в General
+    publish_failed    INTEGER NOT NULL DEFAULT 0  -- адмінам уже повідомлено про збій
 );
 
 -- Останній відомий нікнейм адміна (username, інакше повне ім'я) — щоб
@@ -97,6 +100,36 @@ CREATE TABLE IF NOT EXISTS custom_messages (
 CREATE TABLE IF NOT EXISTS admin_names (
     user_id     INTEGER PRIMARY KEY,
     name        TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+
+-- Довільний стан бота, що має пережити рестарт (напр. свіжість даних
+-- alerts.in.ua, які адміни вже отримали "Що нового").
+CREATE TABLE IF NOT EXISTS bot_state (
+    key    TEXT PRIMARY KEY,
+    value  TEXT NOT NULL
+);
+
+-- Журнал дій адмінів і бота (кнопка «Історія»). user_id NULL — дія бота.
+CREATE TABLE IF NOT EXISTS action_log (
+    id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    at       TEXT NOT NULL,   -- канонічний UTC ISO8601
+    user_id  INTEGER,
+    action   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_action_log_at ON action_log (at);
+
+-- Зміни текстів, зроблені через бота (кнопка «Тексти»), поверх
+-- config/texts.json: text NULL — текст із файлу без змін; from_bot=1 —
+-- варіант доданий через бота (у файлі його немає).
+CREATE TABLE IF NOT EXISTS text_variants (
+    variant_id  TEXT PRIMARY KEY,
+    set_name    TEXT NOT NULL,
+    text        TEXT,
+    enabled     INTEGER NOT NULL DEFAULT 1,
+    from_bot    INTEGER NOT NULL DEFAULT 0,
+    updated_by  INTEGER,
     updated_at  TEXT NOT NULL
 );
 
@@ -139,6 +172,14 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.execute("ALTER TABLE preview_state ADD COLUMN actor_action TEXT")
     if not _column_exists(conn, "custom_messages", "updated_by"):
         conn.execute("ALTER TABLE custom_messages ADD COLUMN updated_by INTEGER")
+    if not _column_exists(conn, "preview_state", "group_message_id"):
+        conn.execute("ALTER TABLE preview_state ADD COLUMN group_message_id INTEGER")
+    if not _column_exists(conn, "custom_messages", "group_message_id"):
+        conn.execute("ALTER TABLE custom_messages ADD COLUMN group_message_id INTEGER")
+    if not _column_exists(conn, "custom_messages", "publish_failed"):
+        conn.execute(
+            "ALTER TABLE custom_messages ADD COLUMN publish_failed INTEGER NOT NULL DEFAULT 0"
+        )
     conn.commit()
     return conn
 
@@ -210,6 +251,10 @@ def alerts_overlapping(
 def get_manual_day_type(conn: sqlite3.Connection, day: str) -> str | None:
     row = conn.execute("SELECT day_type FROM manual_day_type WHERE day = ?", (day,)).fetchone()
     return row["day_type"] if row else None
+
+
+def get_manual_day(conn: sqlite3.Connection, day: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM manual_day_type WHERE day = ?", (day,)).fetchone()
 
 
 def set_manual_day_type(
@@ -305,7 +350,8 @@ def upsert_preview(
             resolved_by = NULL,
             scheduled_at = NULL,
             actor_id = excluded.actor_id,
-            actor_action = excluded.actor_action
+            actor_action = excluded.actor_action,
+            group_message_id = NULL
         """,
         (
             morning_date,
@@ -376,6 +422,32 @@ def set_preview_actor(
     conn.execute(
         "UPDATE preview_state SET actor_id = ?, actor_action = ? WHERE morning_date = ?",
         (actor_id, actor_action, morning_date),
+    )
+    conn.commit()
+
+
+def set_preview_group_message(
+    conn: sqlite3.Connection, morning_date: str, group_message_id: int | None
+) -> None:
+    conn.execute(
+        "UPDATE preview_state SET group_message_id = ? WHERE morning_date = ?",
+        (group_message_id, morning_date),
+    )
+    conn.commit()
+
+
+def set_preview_published_text(conn: sqlite3.Connection, morning_date: str, text: str) -> None:
+    conn.execute(
+        "UPDATE preview_state SET message_text = ? WHERE morning_date = ?", (text, morning_date)
+    )
+    conn.commit()
+
+
+def set_preview_status(conn: sqlite3.Connection, morning_date: str, status: str) -> None:
+    """Лише status — на відміну від resolve_preview, зберігає resolved_by
+    (хто публікував), напр. для 'deleted' після видалення з General."""
+    conn.execute(
+        "UPDATE preview_state SET status = ? WHERE morning_date = ?", (status, morning_date)
     )
     conn.commit()
 
@@ -506,13 +578,36 @@ def set_custom_message_status(
 
 
 def mark_custom_message_sent(
-    conn: sqlite3.Connection, custom_message_id: int, sent_at: str
+    conn: sqlite3.Connection,
+    custom_message_id: int,
+    sent_at: str,
+    group_message_id: int | None = None,
 ) -> None:
     conn.execute(
-        "UPDATE custom_messages SET status = 'sent', sent_at = ?, updated_at = ? WHERE id = ?",
-        (sent_at, sent_at, custom_message_id),
+        """
+        UPDATE custom_messages
+        SET status = 'sent', sent_at = ?, updated_at = ?, group_message_id = ?
+        WHERE id = ?
+        """,
+        (sent_at, sent_at, group_message_id, custom_message_id),
     )
     conn.commit()
+
+
+def set_custom_message_publish_failed(
+    conn: sqlite3.Connection, custom_message_id: int, failed: bool
+) -> None:
+    conn.execute(
+        "UPDATE custom_messages SET publish_failed = ? WHERE id = ?",
+        (int(failed), custom_message_id),
+    )
+    conn.commit()
+
+
+def scheduled_custom_messages(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM custom_messages WHERE status = 'scheduled' ORDER BY scheduled_at"
+    ).fetchall()
 
 
 def due_custom_messages(conn: sqlite3.Connection, now_utc_iso: str) -> list[sqlite3.Row]:
@@ -565,3 +660,86 @@ def upsert_admin_name(conn: sqlite3.Connection, user_id: int, name: str, updated
 def get_admin_name(conn: sqlite3.Connection, user_id: int) -> str | None:
     row = conn.execute("SELECT name FROM admin_names WHERE user_id = ?", (user_id,)).fetchone()
     return row["name"] if row else None
+
+
+# --- bot state ----------------------------------------------------------------------
+
+
+def get_state(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM bot_state WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def set_state(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO bot_state (key, value) VALUES (?, ?)
+        ON CONFLICT (key) DO UPDATE SET value = excluded.value
+        """,
+        (key, value),
+    )
+    conn.commit()
+
+
+def delete_state(conn: sqlite3.Connection, key: str) -> None:
+    conn.execute("DELETE FROM bot_state WHERE key = ?", (key,))
+    conn.commit()
+
+
+# --- action log ---------------------------------------------------------------------
+
+
+def log_action(conn: sqlite3.Connection, at: str, user_id: int | None, action: str) -> None:
+    conn.execute(
+        "INSERT INTO action_log (at, user_id, action) VALUES (?, ?, ?)", (at, user_id, action)
+    )
+    conn.commit()
+
+
+def recent_actions(conn: sqlite3.Connection, since_iso: str, limit: int) -> list[sqlite3.Row]:
+    """Найновіші спершу."""
+    return conn.execute(
+        "SELECT * FROM action_log WHERE at >= ? ORDER BY at DESC, id DESC LIMIT ?",
+        (since_iso, limit),
+    ).fetchall()
+
+
+# --- text variants --------------------------------------------------------------------
+
+
+def text_variant_overrides(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM text_variants ORDER BY variant_id").fetchall()
+
+
+def upsert_text_variant(
+    conn: sqlite3.Connection,
+    *,
+    variant_id: str,
+    set_name: str,
+    text: str | None,
+    enabled: bool,
+    from_bot: bool,
+    updated_by: int | None,
+    updated_at: str,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO text_variants
+            (variant_id, set_name, text, enabled, from_bot, updated_by, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (variant_id) DO UPDATE SET
+            set_name = excluded.set_name,
+            text = excluded.text,
+            enabled = excluded.enabled,
+            from_bot = excluded.from_bot,
+            updated_by = excluded.updated_by,
+            updated_at = excluded.updated_at
+        """,
+        (variant_id, set_name, text, int(enabled), int(from_bot), updated_by, updated_at),
+    )
+    conn.commit()
+
+
+def delete_text_variant(conn: sqlite3.Connection, variant_id: str) -> None:
+    conn.execute("DELETE FROM text_variants WHERE variant_id = ?", (variant_id,))
+    conn.commit()

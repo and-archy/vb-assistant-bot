@@ -36,6 +36,10 @@ alerts.in.ua ──poll (JobQueue.run_repeating)──▶ [1] alerts_client + ti
 `generate_and_send_preview(force=True)`, обходячи тригер — ТЗ п.4.
 `/markweekend`, `/markworkday` пишуть у `manual_day_type` — ТЗ п.13.
 
+З 2026-10-05 поверх цього: хто виконав дію ([11]), сповіщення про тихі
+збої ([12]), виправлення/видалення в General ([13]), тексти через бота
+([14]), «Статус» / «Заплановані» / «Історія» / «Що нового» ([15]).
+
 ## [1] Джерело тривог — alerts_client.py + timeutil.py
 
 `AlertsInUaClient.fetch_region_history(region_uid)` —
@@ -114,9 +118,28 @@ CREATE TABLE preview_messages (morning_date, chat_id, message_id);  -- копі�
 
 CREATE TABLE send_log (
     id, morning_date, variant_set, variant_id, mode,  -- manual/auto
-    sent_by, sent_at, group_message_id
+    sent_by, sent_at, group_message_id   -- з 2026-10-05 реально заповнюється
+);
+
+-- 2026-10-05+
+-- preview_state: + actor_id, actor_action (остання дія над pending:
+--   support/more/calm/cancel, а після публікації edited/deleted),
+--   + group_message_id (id повідомлення в General).
+-- custom_messages: + updated_by, + group_message_id,
+--   + publish_failed (адмінам уже повідомлено про збій публікації);
+--   status += 'deleted'. preview_state.status += 'deleted'.
+CREATE TABLE admin_names (user_id INTEGER PRIMARY KEY, name TEXT, updated_at TEXT);
+CREATE TABLE bot_state (key TEXT PRIMARY KEY, value TEXT);   -- alerts_*, whats_new_seen:*
+CREATE TABLE action_log (id, at, user_id /* NULL = бот */, action TEXT);
+CREATE TABLE text_variants (
+    variant_id TEXT PRIMARY KEY, set_name TEXT,
+    text TEXT,            -- NULL = текст із config/texts.json
+    enabled INTEGER, from_bot INTEGER, updated_by INTEGER, updated_at TEXT
 );
 ```
+
+Міграції — `ALTER TABLE ... ADD COLUMN` в `init_db` (перевірка
+`_column_exists`), нові таблиці — `CREATE TABLE IF NOT EXISTS`.
 
 `preview_state.morning_date` — природний ключ дня (не `created_at`):
 `/support`, повторний виклик того ж ранку чи повторне спрацювання
@@ -338,3 +361,72 @@ seconds`). Виправлено на двох рівнях: `poll_alerts` вин
 перемикання на іншу кнопку під час незавершеного вводу лишало б
 «привида» `custom_step`, і наступне звичайне повідомлення адміна
 хибно зчитувалось би як текст/час свого повідомлення.
+
+## [11] Хто виконав дію — access.remember_admin + admin_names
+
+`TypeHandler(Update, access.remember_admin)` у групі `-1` (виконується
+перед усіма, не зупиняє інші групи) на кожному апдейті від адміна
+оновлює `admin_names` (username, інакше повне ім'я; запис лише при
+зміні). Вигляди беруть ім'я через `access.admin_label(conn, user_id)`:
+`None` — дію виконав бот, невідомий адмін — `id 123`. Так ім'я
+актуальне навіть для старих рядків (`resolved_by`, `created_by`,
+`set_by` зберігають лише id).
+
+## [12] Здоров'я — health.py, alerts_health.py, custom.job_dispatch
+
+- `health`: `on_error` → `record_error` (серія помилок у
+  `bot_data`); `job_check_recovery` (раз/хв) після 3 хв тиші й успішного
+  `get_me` шле «✅ Бот знову працює…». Стан у `bot_data` (а не БД):
+  після рестарту процесу серії помилок уже немає.
+- `alerts_health`: `poll_alerts` викликає `on_poll_success` /
+  `on_poll_failure`; стан у `bot_state` (переживає рестарт).
+  `stale_warning` додається до `stats_intro` прев'ю, якщо останнє
+  успішне оновлення старше 15 хв; повідомлення адмінам — при збої
+  > 30 хв і при відновленні після такого збою.
+- `custom.job_dispatch`: при першому збої публікації (`publish_failed=0`)
+  — повідомлення адмінам; при успіху після збою — «✅ таки
+  опубліковано».
+
+## [13] Дії з опублікованим — handlers/published.py
+
+`_publish` / `job_dispatch` зберігають `message_id` у
+`preview_state.group_message_id` / `custom_messages.group_message_id`
+(+ `send_log`). Вигляд опублікованого отримує
+`keyboards.published_keyboard` (`pub:<prev|custom>:<key>:edit|del`).
+`del` лише міняє клавіатуру в того, хто натиснув, на підтвердження
+(`del_yes`/`del_no`); `del_yes` → `bot.delete_message` (Telegram:
+лише ≤48 год) → `status='deleted'`. `edit` → стан
+`input_state.PUBLISHED_EDIT`, наступний текст → `bot.edit_message_text`
+у General і оновлення тексту в БД.
+
+## [14] Тексти через бота — text_store.py + handlers/texts.py
+
+`config/texts.json` — база; `text_variants` — зміни поверх неї.
+`text_store.effective_texts` (лише увімкнені варіанти) кладеться в
+`bot_data["texts"]` при старті й після кожної зміни — колода
+(`deck.draw_next`) бере саме його; зміна складу набору перетасовує
+колоду (наявна перевірка «remaining ⊆ all_ids»). Останній увімкнений
+варіант набору вимкнути/видалити не можна, тож набір не буває
+порожнім. Callback — `txt:<sets|set|var|add|edit|toggle|reset|del>:<arg>`.
+
+## [15] Перегляд — handlers/overview.py, audit.py, whats_new.py
+
+- `audit.log` пишеться в кожній точці дії (прев'ю, свої повідомлення,
+  тип дня, тексти, виправлення/видалення в General, публікації бота);
+  «🕘 Історія» — останні 30 записів за 7 днів.
+- «📋 Статус» збирає один текст з наявних джерел (без нового стану).
+- «🗓 Заплановані» надсилає адміну свіжу копію кожного запланованого
+  повідомлення й перезаписує його `preview_messages` /
+  `custom_message_previews` — далі `_broadcast` оновлює саме нову копію.
+- `whats_new.job_announce` (`run_once`, 10 с після старту) — «Що нового»
+  + `MAIN_KEYBOARD` кожному адміну, один раз на `VERSION`
+  (`bot_state["whats_new_seen:<id>"]`): без надсилання нової
+  `ReplyKeyboardMarkup` нові кнопки в адмінів не з'являються.
+
+## [16] Один активний ввід — input_state.py
+
+Текстові хендлери живуть у різних групах PTB (custom — 0, час прев'ю —
+1, виправлення в General — 2, тексти — 3), тож одне повідомлення
+могли б зчитати кілька. Тому кожен потік вводу перед стартом викликає
+`input_state.clear_all`, будь-яка кнопка меню (крім «Скасувати») теж,
+а «❌ Скасувати» / `/cancel` (`menu.cancel`) скидає будь-який ввід.

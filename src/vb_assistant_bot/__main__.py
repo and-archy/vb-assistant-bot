@@ -14,12 +14,12 @@ from telegram.ext import (
     filters,
 )
 
-from vb_assistant_bot import db, health, scheduler
+from vb_assistant_bot import db, health, scheduler, text_store, whats_new
 from vb_assistant_bot.access import remember_admin
 from vb_assistant_bot.alerts_client import AlertsInUaClient
 from vb_assistant_bot.config import Config, load_config
 from vb_assistant_bot.content import load_texts, load_thresholds
-from vb_assistant_bot.handlers import custom, menu, support, weekend
+from vb_assistant_bot.handlers import custom, menu, overview, published, support, texts, weekend
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +60,17 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 def main() -> None:
     _configure_logging()
     config = load_config()
-    texts = load_texts(config.texts_config_path)
+    file_texts = load_texts(config.texts_config_path)
     thresholds = load_thresholds(config.thresholds_config_path)
     conn = db.init_db(config.db_path)
 
     application = ApplicationBuilder().token(config.token).build()
     application.bot_data["conn"] = conn
     application.bot_data["config"] = config
-    application.bot_data["texts"] = texts
+    # file_texts — як у config/texts.json; texts — з урахуванням змін,
+    # зроблених через «✏️ Тексти» (саме їх бере колода).
+    application.bot_data["file_texts"] = file_texts
+    application.bot_data["texts"] = text_store.effective_texts(file_texts, conn)
     application.bot_data["thresholds"] = thresholds
     application.bot_data["alerts_client"] = AlertsInUaClient(config.alerts_api_token)
 
@@ -80,9 +83,15 @@ def main() -> None:
     application.add_handler(CommandHandler("markweekend", weekend.mark_weekend))
     application.add_handler(CommandHandler("markworkday", weekend.mark_workday))
     application.add_handler(CommandHandler("custom", custom.start))
-    application.add_handler(CommandHandler("cancel", custom.cancel_compose))
+    application.add_handler(CommandHandler("cancel", menu.cancel))
+    application.add_handler(CommandHandler("status", overview.status))
+    application.add_handler(CommandHandler("scheduled", overview.scheduled))
+    application.add_handler(CommandHandler("history", overview.history))
+    application.add_handler(CommandHandler("texts", texts.show))
     application.add_handler(CallbackQueryHandler(scheduler.on_preview_action, pattern=r"^prev:"))
     application.add_handler(CallbackQueryHandler(custom.on_action, pattern=r"^custom:"))
+    application.add_handler(CallbackQueryHandler(published.on_action, pattern=r"^pub:"))
+    application.add_handler(CallbackQueryHandler(texts.on_action, pattern=r"^txt:"))
     # Кнопки — ПЕРЕД загальним текстовим хендлером: у межах однієї групи
     # PTB зупиняється на першому хендлері, чий фільтр збігся, тож
     # натискання кнопки ніколи не потрапляє в custom.on_text.
@@ -95,9 +104,17 @@ def main() -> None:
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, scheduler.on_text), group=1
     )
+    # Так само окремі групи для виправлення тексту в General і тексту
+    # варіанта («✏️ Тексти»). Активним завжди є лише один стан вводу
+    # (input_state.clear_all перед стартом кожного), тож групи не конкурують.
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, published.on_text), group=2
+    )
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, texts.on_text), group=3)
     application.add_error_handler(on_error)
 
     scheduler.register(application, config, thresholds)
+    application.job_queue.run_once(whats_new.job_announce, when=10)
     application.job_queue.run_repeating(
         health.job_check_recovery,
         interval=health.CHECK_INTERVAL_SECONDS,

@@ -6,15 +6,16 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
-from vb_assistant_bot import db
+from vb_assistant_bot import audit, db, input_state
 from vb_assistant_bot.access import admin_label, ensure_admin
 from vb_assistant_bot.config import Config
+from vb_assistant_bot.keyboards import published_keyboard
 
 logger = logging.getLogger(__name__)
 
-_STEP_KEY = "custom_step"
-_TEXT_KEY = "custom_text"
-_EDIT_ID_KEY = "custom_edit_id"
+_STEP_KEY = input_state.CUSTOM_STEP
+_TEXT_KEY = input_state.CUSTOM_TEXT
+_EDIT_ID_KEY = input_state.CUSTOM_EDIT_ID
 
 _DATETIME_FORMAT = "%d.%m.%Y %H:%M"
 _EMPTY_KEYBOARD = InlineKeyboardMarkup([])
@@ -47,7 +48,7 @@ def _authors(conn, row) -> str:
     parts = [admin_label(conn, row["created_by"])]
     editor = admin_label(conn, row["updated_by"])
     if editor:
-        verb = "скасував" if row["status"] == "cancelled" else "змінив"
+        verb = {"cancelled": "скасував", "deleted": "видалив"}.get(row["status"], "змінив")
         parts.append(f"{verb} {editor}")
     return f" ({', '.join(p for p in parts if p)})"
 
@@ -60,7 +61,24 @@ def _view(conn, row, timezone: str) -> tuple[str, InlineKeyboardMarkup]:
         return body, _keyboard(row["id"])
     if row["status"] == "cancelled":
         return f"📝 Скасовано (мало піти о {when}){who}:\n\n{row['text']}", _EMPTY_KEYBOARD
-    return f"✅ Опубліковано о {when}{who}:\n\n{row['text']}", _EMPTY_KEYBOARD
+    if row["status"] == "deleted":
+        return f"🗑 Видалено з General (було опубліковано о {when}){who}:\n\n{row['text']}", (
+            _EMPTY_KEYBOARD
+        )
+    keyboard = (
+        published_keyboard("custom", row["id"])
+        if row["group_message_id"] is not None
+        else _EMPTY_KEYBOARD
+    )
+    return f"✅ Опубліковано о {when}{who}:\n\n{row['text']}", keyboard
+
+
+def message_view(conn, row, timezone: str) -> tuple[str, InlineKeyboardMarkup]:
+    return _view(conn, row, timezone)
+
+
+async def refresh_views(context: ContextTypes.DEFAULT_TYPE, custom_message_id: int) -> None:
+    await _broadcast(context, custom_message_id)
 
 
 def _parse_datetime(text: str, timezone: str) -> datetime | None:
@@ -111,6 +129,10 @@ def _clear_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop(_EDIT_ID_KEY, None)
 
 
+def _when(row, timezone: str) -> str:
+    return _local_label(row["scheduled_at"], timezone)
+
+
 def reset_state(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Публічна обгортка для `menu.on_button` — перемикання на іншу
     кнопку меню (не «Скасувати», не «Своє повідомлення») під час
@@ -124,6 +146,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.bot_data["config"]
     if not await ensure_admin(update, config):
         return
+    input_state.clear_all(context.user_data)
     context.user_data[_STEP_KEY] = "await_text"
     await update.effective_message.reply_text(
         "Введіть текст власного повідомлення. /cancel — скасувати."
@@ -181,6 +204,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             created_by=update.effective_user.id,
             created_at=now_utc,
         )
+        audit.log(
+            conn,
+            update.effective_user.id,
+            f"запланував своє повідомлення на {parsed.strftime(_DATETIME_FORMAT)}",
+        )
         await _broadcast(context, custom_message_id)
         await update.effective_message.reply_text(
             f"Заплановано на {parsed.strftime(_DATETIME_FORMAT)}."
@@ -192,6 +220,12 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         _clear_state(context)
         db.update_custom_message_text(
             conn, custom_message_id, text, now_utc, update.effective_user.id
+        )
+        row = db.get_custom_message(conn, custom_message_id)
+        audit.log(
+            conn,
+            update.effective_user.id,
+            f"змінив текст свого повідомлення (на {_when(row, config.timezone)})",
         )
         await _broadcast(context, custom_message_id)
         await update.effective_message.reply_text("Текст оновлено.")
@@ -212,6 +246,11 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             parsed.astimezone(UTC).isoformat(),
             now_utc,
             update.effective_user.id,
+        )
+        audit.log(
+            conn,
+            update.effective_user.id,
+            f"переніс своє повідомлення на {parsed.strftime(_DATETIME_FORMAT)}",
         )
         await _broadcast(context, custom_message_id)
         await update.effective_message.reply_text(
@@ -247,11 +286,13 @@ async def on_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         db.set_custom_message_status(
             conn, custom_message_id, "cancelled", datetime.now(UTC).isoformat(), user.id
         )
+        audit.log(conn, user.id, f"скасував своє повідомлення (на {_when(row, config.timezone)})")
         await query.answer("Скасовано")
         await _broadcast(context, custom_message_id)
         return
 
     if action == "edit_text":
+        input_state.clear_all(context.user_data)
         context.user_data[_STEP_KEY] = "await_edit_text"
         context.user_data[_EDIT_ID_KEY] = custom_message_id
         await query.answer()
@@ -259,6 +300,7 @@ async def on_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     if action == "edit_time":
+        input_state.clear_all(context.user_data)
         context.user_data[_STEP_KEY] = "await_edit_time"
         context.user_data[_EDIT_ID_KEY] = custom_message_id
         await query.answer()
@@ -270,15 +312,48 @@ async def on_action(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.warning("Невідома дія свого повідомлення: %s", query.data)
 
 
+async def _notify_admins(context: ContextTypes.DEFAULT_TYPE, config: Config, text: str) -> None:
+    for admin_id in config.admin_user_ids:
+        try:
+            await context.bot.send_message(chat_id=admin_id, text=text)
+        except TelegramError as exc:
+            logger.error("Не вдалося повідомити адміна %s: %s", admin_id, exc)
+
+
 async def job_dispatch(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Збій публікації раніше лише логувався, а повтор ішов мовчки щохвилини
+    — адміни не знали, що повідомлення «застрягло». Тепер про перший збій
+    (на кожне повідомлення — один раз) і про успішну публікацію після
+    нього адміни отримують по повідомленню."""
     conn = context.bot_data["conn"]
     config: Config = context.bot_data["config"]
     now_iso = datetime.now(UTC).isoformat()
     for row in db.due_custom_messages(conn, now_iso):
+        when = _when(row, config.timezone)
+        author = admin_label(conn, row["created_by"])
         try:
-            await context.bot.send_message(chat_id=config.group_chat_id, text=row["text"])
+            sent = await context.bot.send_message(chat_id=config.group_chat_id, text=row["text"])
         except TelegramError as exc:
             logger.error("Не вдалося опублікувати своє повідомлення id=%s: %s", row["id"], exc)
+            if not row["publish_failed"]:
+                db.set_custom_message_publish_failed(conn, row["id"], True)
+                await _notify_admins(
+                    context,
+                    config,
+                    f"⚠️ Не вдалося опублікувати своє повідомлення в General "
+                    f"(заплановане на {when}, автор {author}): {exc}\n"
+                    "Пробую ще раз щохвилини. Щоб зупинити — натисніть «Скасувати» "
+                    "під повідомленням (кнопка «🗓 Заплановані»).",
+                )
             continue
-        db.mark_custom_message_sent(conn, row["id"], now_iso)
+        db.mark_custom_message_sent(conn, row["id"], now_iso, getattr(sent, "message_id", None))
+        audit.log(conn, None, f"опубліковано своє повідомлення в General (автор {author})")
+        if row["publish_failed"]:
+            db.set_custom_message_publish_failed(conn, row["id"], False)
+            await _notify_admins(
+                context,
+                config,
+                f"✅ Своє повідомлення (заплановане на {when}, автор {author}) "
+                "таки опубліковано в General.",
+            )
         await _broadcast(context, row["id"])

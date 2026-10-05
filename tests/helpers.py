@@ -43,4 +43,5 @@ def make_context(conn, config, texts=None, thresholds=None, args=None, user_data
     context.bot.edit_message_reply_markup = AsyncMock()
     context.bot.edit_message_text = AsyncMock()
     context.bot.get_me = AsyncMock()
+    context.bot.delete_message = AsyncMock()
     return context

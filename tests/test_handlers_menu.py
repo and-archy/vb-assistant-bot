@@ -3,7 +3,7 @@ from datetime import date
 
 from helpers import make_context, make_update
 
-from vb_assistant_bot import db, scheduler
+from vb_assistant_bot import db, input_state, scheduler
 from vb_assistant_bot.handlers import menu
 
 
@@ -127,3 +127,55 @@ def test_on_button_switching_away_from_custom_clears_stale_state(conn, config, t
 
     assert "custom_step" not in context.user_data
     assert "custom_text" not in context.user_data
+
+
+def test_new_buttons_are_in_keyboard():
+    labels = [btn.text for row in menu.MAIN_KEYBOARD.keyboard for btn in row]
+    for label in (menu.BTN_STATUS, menu.BTN_SCHEDULED, menu.BTN_HISTORY, menu.BTN_TEXTS):
+        assert label in labels
+    assert set(labels) == set(menu.BUTTON_LABELS)
+
+
+def test_on_button_status_replies(conn, config, thresholds):
+    update = make_update(user_id=111, text=menu.BTN_STATUS)
+    context = make_context(conn, config, thresholds=thresholds)
+
+    asyncio.run(menu.on_button(update, context))
+
+    assert update.effective_message.reply_text.await_args.args[0].startswith("📋 Статус")
+
+
+def test_on_button_history_and_scheduled_reply(conn, config):
+    for label in (menu.BTN_HISTORY, menu.BTN_SCHEDULED):
+        update = make_update(user_id=111, text=label)
+        asyncio.run(menu.on_button(update, make_context(conn, config)))
+        update.effective_message.reply_text.assert_awaited_once()
+
+
+def test_on_button_texts_shows_sets(conn, config, texts):
+    update = make_update(user_id=111, text=menu.BTN_TEXTS)
+    asyncio.run(menu.on_button(update, make_context(conn, config, texts=texts)))
+    assert "Оберіть набір" in update.effective_message.reply_text.await_args.args[0]
+
+
+def test_cancel_clears_published_edit_and_texts_input(conn, config):
+    for key in (input_state.PUBLISHED_EDIT, input_state.TEXTS_STEP):
+        context = make_context(conn, config)
+        context.user_data[key] = "x:y"
+        update = make_update(user_id=111, text=menu.BTN_CANCEL)
+
+        asyncio.run(menu.on_button(update, context))
+
+        assert key not in context.user_data
+        update.effective_message.reply_text.assert_awaited_once_with("Скасовано.")
+
+
+def test_cancel_with_nothing_pending(conn, config):
+    update = make_update(user_id=111, text=menu.BTN_CANCEL)
+    asyncio.run(menu.on_button(update, make_context(conn, config)))
+    update.effective_message.reply_text.assert_awaited_once_with("Нема чого скасовувати.")
+
+
+def test_help_mentions_new_features():
+    for word in ("Статус", "Заплановані", "Історія", "Тексти", "Видалити з General"):
+        assert word in menu.HELP_TEXT

@@ -254,3 +254,41 @@ def test_new_message_view_shows_author(conn, config):
 
     for _, kwargs in context.bot.send_message.await_args_list:
         assert "(admin1):" in kwargs["text"]
+
+
+def test_job_dispatch_failure_notifies_admins_once_then_reports_success(conn, config):
+    from telegram.error import NetworkError
+
+    context = make_context(conn, config)
+    custom_id = _create_scheduled(conn, text="важливе", scheduled_at=_PAST_ISO_UTC)
+
+    def fail_in_general(chat_id, text, **_):
+        if chat_id == config.group_chat_id:
+            raise NetworkError("down")
+
+    context.bot.send_message.side_effect = fail_in_general
+
+    asyncio.run(custom.job_dispatch(context))
+    asyncio.run(custom.job_dispatch(context))
+
+    admin_texts = [
+        kw["text"]
+        for _, kw in context.bot.send_message.await_args_list
+        if kw["chat_id"] != config.group_chat_id
+    ]
+    assert len(admin_texts) == len(config.admin_user_ids)
+    assert admin_texts[0].startswith("⚠️ Не вдалося опублікувати своє повідомлення")
+    assert db.get_custom_message(conn, custom_id)["status"] == "scheduled"
+
+    context.bot.send_message.side_effect = None
+    context.bot.send_message.reset_mock()
+    asyncio.run(custom.job_dispatch(context))
+
+    row = db.get_custom_message(conn, custom_id)
+    assert row["status"] == "sent" and row["publish_failed"] == 0
+    admin_texts = [
+        kw["text"]
+        for _, kw in context.bot.send_message.await_args_list
+        if kw.get("chat_id") != config.group_chat_id
+    ]
+    assert any(t.startswith("✅ Своє повідомлення") for t in admin_texts)

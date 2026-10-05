@@ -10,13 +10,14 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
 from telegram.ext import Application, ContextTypes
 
-from vb_assistant_bot import db, deck
+from vb_assistant_bot import alerts_health, audit, db, deck, input_state
 from vb_assistant_bot.access import admin_label
 from vb_assistant_bot.alerts_client import AlertsInUaClient
 from vb_assistant_bot.config import Config
 from vb_assistant_bot.content import Texts, Thresholds
 from vb_assistant_bot.formatting import format_stats_summary
 from vb_assistant_bot.handlers import custom as custom_messages
+from vb_assistant_bot.keyboards import published_keyboard
 from vb_assistant_bot.message_builder import build_message
 from vb_assistant_bot.night_logic import compute_night_stats, is_heavy_night
 from vb_assistant_bot.timeutil import to_canonical_utc_iso
@@ -40,7 +41,7 @@ _EMPTY_KEYBOARD = InlineKeyboardMarkup([])
 # user_data ключ: якщо є — очікуємо від адміна текст "гг:хх" для
 # довільного часу відправки прев'ю з таким morning_date (callback
 # "send_custom" в on_preview_action).
-_SEND_TIME_STEP_KEY = "prev_send_time_for"
+_SEND_TIME_STEP_KEY = input_state.PREVIEW_SEND_TIME
 
 _HHMM_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
@@ -155,7 +156,19 @@ def _skipped_body(conn, preview) -> str:
 
 def _published_body(conn, preview) -> str:
     who = _by(conn, preview["resolved_by"]) or " (автопублікація)"
-    return f"{preview['stats_intro']}\n\n✅ Опубліковано в General{who}:\n{preview['message_text']}"
+    body = f"{preview['stats_intro']}\n\n✅ Опубліковано в General{who}:\n{preview['message_text']}"
+    editor = admin_label(conn, preview["actor_id"])
+    if preview["actor_action"] == "edited" and editor:
+        body += f"\n\n✏️ Текст у General виправив: {editor}"
+    return body
+
+
+def _deleted_body(conn, preview) -> str:
+    return (
+        f"{preview['stats_intro']}\n\n🗑 Видалено з General{_by(conn, preview['actor_id'])}. "
+        f"Було опубліковано{_by(conn, preview['resolved_by']) or ' (автопублікація)'}:\n"
+        f"{preview['message_text']}"
+    )
 
 
 def _format_time(value: time) -> str:
@@ -186,7 +199,14 @@ def _view_for(conn, preview, morning_key: str, timezone: str) -> tuple[str, Inli
     if status == "skipped":
         return _skipped_body(conn, preview), _EMPTY_KEYBOARD
     if status in ("published", "auto_sent"):
-        return _published_body(conn, preview), _EMPTY_KEYBOARD
+        keyboard = (
+            published_keyboard("prev", morning_key)
+            if preview["group_message_id"] is not None
+            else _EMPTY_KEYBOARD
+        )
+        return _published_body(conn, preview), keyboard
+    if status == "deleted":
+        return _deleted_body(conn, preview), _EMPTY_KEYBOARD
     return preview["message_text"], _EMPTY_KEYBOARD
 
 
@@ -222,6 +242,19 @@ def register(application: Application, config: Config, thresholds: Thresholds) -
     application.job_queue.run_repeating(
         job_publish_queued, interval=_QUEUED_PREVIEW_POLL_SECONDS, first=15
     )
+
+
+def preview_view(conn, morning_key: str, timezone: str):
+    """(текст, клавіатура) прев'ю в поточному стані або None — для інших
+    модулів (список запланованого)."""
+    preview = db.get_preview(conn, morning_key)
+    if preview is None:
+        return None
+    return _view_for(conn, preview, morning_key, timezone)
+
+
+async def refresh_preview_views(context: ContextTypes.DEFAULT_TYPE, morning_key: str) -> None:
+    await _broadcast_current_view(context, context.bot_data["conn"], morning_key)
 
 
 def pop_send_state(context: ContextTypes.DEFAULT_TYPE) -> str | None:
@@ -279,6 +312,7 @@ async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     scheduled_at = target_local.astimezone(UTC).isoformat()
     now_utc = datetime.now(UTC).isoformat()
     db.resolve_preview(conn, morning_key, "queued", user.id, now_utc, scheduled_at=scheduled_at)
+    audit.log(conn, user.id, f"запланував ранкове повідомлення на {_format_time(parsed)}")
     await _broadcast_current_view(context, conn, morning_key)
     await update.effective_message.reply_text(f"Заплановано на {_format_time(parsed)}.")
 
@@ -296,8 +330,9 @@ async def poll_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     try:
         records = await asyncio.to_thread(client.fetch_region_history, config.alerts_region_uid)
-    except Exception:
+    except Exception as exc:
         logger.exception("Не вдалося отримати тривоги з alerts.in.ua")
+        await alerts_health.on_poll_failure(context, exc)
         return
 
     for record in records:
@@ -314,6 +349,7 @@ async def poll_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
             finished_at=to_canonical_utc_iso(record.finished_at) if record.finished_at else None,
             updated_at=to_canonical_utc_iso(record.updated_at),
         )
+    await alerts_health.on_poll_success(context)
 
 
 async def generate_and_send_preview(
@@ -359,6 +395,10 @@ async def generate_and_send_preview(
     variant = deck.draw_next(conn, default_set, texts.sets[default_set])
     include_arrangements = day_type == "workday"
     message_text = build_message(texts, variant, include_arrangements=include_arrangements)
+    stats_intro = format_stats_summary(stats, triggered)
+    warning = alerts_health.stale_warning(conn, config.timezone)
+    if warning:
+        stats_intro = f"{stats_intro}\n{warning}"
 
     db.upsert_preview(
         conn,
@@ -369,12 +409,15 @@ async def generate_and_send_preview(
         variant_id=variant.id,
         message_text=message_text,
         stats_json=json.dumps({"count": stats.count}),
-        stats_intro=format_stats_summary(stats, triggered),
+        stats_intro=stats_intro,
         triggered=triggered,
         created_at=datetime.now(UTC).isoformat(),
         actor_id=requested_by,
         actor_action="support" if requested_by is not None else None,
     )
+
+    if requested_by is not None:
+        audit.log(conn, requested_by, "сформував ранкове прев'ю вручну")
 
     preview = db.get_preview(conn, morning_key)
     body, keyboard = _view_for(conn, preview, morning_key, config.timezone)
@@ -503,7 +546,7 @@ _PUBLISH_RETRY_DELAYS = (3, 8)  # секунди між спробами все�
 _PUBLISH_RESCHEDULE_SECONDS = 300  # якщо й повтори не допомогли — ще раз через 5 хв
 
 
-async def _publish(context: ContextTypes.DEFAULT_TYPE, text: str, morning_key: str) -> None:
+async def _publish(context: ContextTypes.DEFAULT_TYPE, text: str, morning_key: str):
     """Публікація в GROUP_CHAT_ID з кількома спробами. Раніше — єдиний
     незахищений виклик, що спрацьовував лише РАЗ НА ДОБУ (job_autopublish
     о 8:00): одна мережева гикавка (httpx.ReadError тощо — PTB обгортає
@@ -514,9 +557,9 @@ async def _publish(context: ContextTypes.DEFAULT_TYPE, text: str, morning_key: s
     attempts = len(_PUBLISH_RETRY_DELAYS) + 1
     for attempt in range(attempts):
         try:
-            await context.bot.send_message(chat_id=config.group_chat_id, text=text)
+            sent = await context.bot.send_message(chat_id=config.group_chat_id, text=text)
             logger.info("Опубліковано ранкове повідомлення в General (%s)", morning_key)
-            return
+            return sent
         except TelegramError as exc:
             if attempt == attempts - 1:
                 raise
@@ -544,7 +587,7 @@ async def _publish_and_resolve(
     retry_job,
 ) -> None:
     try:
-        await _publish(context, preview["message_text"], morning_key)
+        sent = await _publish(context, preview["message_text"], morning_key)
     except TelegramError as exc:
         config: Config = context.bot_data["config"]
         logger.error(
@@ -567,7 +610,16 @@ async def _publish_and_resolve(
         return
 
     now = datetime.now(UTC).isoformat()
+    group_message_id = getattr(sent, "message_id", None)
     db.resolve_preview(conn, morning_key, status, sent_by, now)
+    db.set_preview_group_message(conn, morning_key, group_message_id)
+    audit.log(
+        conn,
+        None,
+        "автопублікація ранкового повідомлення в General"
+        if mode == "auto"
+        else "ранкове повідомлення опубліковано в General",
+    )
     db.add_send_log(
         conn,
         morning_date=morning_key,
@@ -576,7 +628,7 @@ async def _publish_and_resolve(
         mode=mode,
         sent_by=sent_by,
         sent_at=now,
-        group_message_id=None,
+        group_message_id=group_message_id,
     )
     await _broadcast_current_view(context, conn, morning_key)
 
@@ -656,6 +708,7 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     if action == "send_now":
         db.resolve_preview(conn, morning_key, "queued", user.id, now, scheduled_at=now)
+        audit.log(conn, user.id, "надіслав ранкове повідомлення зараз")
         await query.answer("Публікую...")
         await _broadcast_current_view(context, conn, morning_key)
         await job_publish_queued(context)
@@ -670,6 +723,7 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         scheduled_at = (now_local if immediate else target_local).astimezone(UTC).isoformat()
         db.resolve_preview(conn, morning_key, "queued", user.id, now, scheduled_at=scheduled_at)
         label = _format_time(thresholds.autopublish_time)
+        audit.log(conn, user.id, f"запланував ранкове повідомлення на {label}")
         await query.answer("Публікую..." if immediate else f"Заплановано на {label}")
         await _broadcast_current_view(context, conn, morning_key)
         if immediate:
@@ -677,6 +731,7 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if action == "send_custom":
+        input_state.clear_all(context.user_data)
         context.user_data[_SEND_TIME_STEP_KEY] = morning_key
         await query.answer()
         try:
@@ -692,12 +747,14 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if action == "cancel":
         db.resolve_preview(conn, morning_key, "pending", None, None)
         db.set_preview_actor(conn, morning_key, user.id, "cancel")
+        audit.log(conn, user.id, "скасував заплановану публікацію ранкового повідомлення")
         await query.answer("Скасовано — оберіть варіант і надішліть знову")
         await _broadcast_current_view(context, conn, morning_key)
         return
 
     if action == "skip":
         db.resolve_preview(conn, morning_key, "skipped", user.id, now)
+        audit.log(conn, user.id, "пропустив ранкове прев'ю")
         await query.answer("Пропущено")
         await _broadcast_current_view(context, conn, morning_key)
         return
@@ -715,6 +772,8 @@ async def on_preview_action(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             message_text=message_text,
         )
         db.set_preview_actor(conn, morning_key, user.id, action)
+        what = "стриманий тон" if action == "calm" else "інший варіант"
+        audit.log(conn, user.id, f"обрав {what} ранкового повідомлення ({variant.id})")
         await query.answer()
         await _broadcast_current_view(context, conn, morning_key)
         return

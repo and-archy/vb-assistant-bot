@@ -17,13 +17,23 @@ src/vb_assistant_bot/
     deck.py                # перетасована колода
     message_builder.py     # build_message
     formatting.py           # format_stats_summary (текст прев'ю)
-    access.py                # ensure_admin
+    access.py                # ensure_admin, remember_admin, admin_label, display_name
     scheduler.py              # jobs + generate_and_send_preview + on_preview_action
+    health.py                  # серія помилок + job_check_recovery («✅ знову працює»)
+    alerts_health.py            # свіжість даних alerts.in.ua (bot_state)
+    audit.py                     # action_log: log, format_history
+    input_state.py                # ключі user_data вводу + clear_all
+    keyboards.py                   # кнопки під опублікованим у General
+    text_store.py                   # texts.json + text_variants -> effective Texts
+    whats_new.py                     # одноразове «Що нового» адмінам
     handlers/
-        menu.py               # /start /help
+        menu.py               # /start /help /cancel + кнопкове меню
         support.py             # /support
         weekend.py              # /markweekend /markworkday
-        custom.py                # /custom /cancel — своє повідомлення на власну дату/час
+        custom.py                # /custom — своє повідомлення на власну дату/час
+        published.py              # pub:* — виправити/видалити в General
+        texts.py                   # /texts, txt:* — керування текстами
+        overview.py                 # /status /scheduled /history
 ```
 
 ## Контракти
@@ -151,6 +161,22 @@ cancel}` — дозволені залежно від поточного `status
 `job_publish_queued` (поллер, раз/хв), не єдина добова джоба. `send_back`
 повертає до звичайного вигляду `pending` без змін у БД.
 
+## Callback data формат — опубліковане (2026-10-05+)
+
+`pub:<prev|custom>:<morning_date|custom id>:<action>`, `<action>` ∈
+`{edit, del, del_yes, del_no}`. Дозволено лише для
+`preview_state.status ∈ {published, auto_sent}` /
+`custom_messages.status == "sent"` з `group_message_id IS NOT NULL`,
+інакше «Вже неактуально».
+
+## Callback data формат — тексти (2026-10-05+)
+
+`txt:sets`, `txt:set:<A|V|B>`, `txt:add:<set>`,
+`txt:<var|edit|toggle|reset|del>:<variant_id>`. `add`/`edit` ставлять
+`user_data["texts_step"] = "add:<set>" | "edit:<id>"`, текст — наступним
+повідомленням (`texts.on_text`, група 3). `reset` — лише для варіантів
+із файлу, `del` — лише для доданих у боті.
+
 ## Callback data формат — /custom
 
 `custom:<id>:<action>`, `<action>` ∈ `{cancel, edit_text, edit_time}`.
@@ -168,7 +194,11 @@ cancel}` — дозволені залежно від поточного `status
 | `/markweekend [дд.мм.рррр]` | адміни | `manual_day_type[day] = "weekend"` |
 | `/markworkday [дд.мм.рррр]` | адміни | `manual_day_type[day] = "workday"` |
 | `/custom` | адміни | старт компоновки свого повідомлення (текст → дата/час) |
-| `/cancel` | адміни | скидає незавершений ввід `/custom` (текст/час/редагування) |
+| `/cancel` | адміни | `menu.cancel` — скидає будь-який незавершений ввід (`input_state.clear_all`) |
+| `/status` | адміни | `overview.status` — стан бота одним екраном |
+| `/scheduled` | адміни | `overview.scheduled` — копії всіх запланованих з кнопками |
+| `/history` | адміни | `overview.history` — `action_log` за 7 днів |
+| `/texts` | адміни | `texts.show` — керування варіантами текстів |
 
 Групу General бот не гейтить — жодних `MessageHandler` на текст
 учасників, лише `bot.send_message(GROUP_CHAT_ID, ...)`. Виняток —
@@ -182,13 +212,30 @@ cancel}` — дозволені залежно від поточного `status
 ```python
 BTN_SUPPORT = "🌅 Прев'ю зараз"      # -> support.support
 BTN_CUSTOM = "📝 Своє повідомлення"   # -> custom.start
+BTN_SCHEDULED = "🗓 Заплановані"      # -> overview.scheduled
+BTN_STATUS = "📋 Статус"              # -> overview.status
 BTN_WEEKEND = "🌴 Вихідний сьогодні"  # -> weekend.mark_weekend, context.args=[]
 BTN_WORKDAY = "💼 Робочий сьогодні"   # -> weekend.mark_workday, context.args=[]
-BTN_CANCEL = "❌ Скасувати"           # -> custom.cancel_compose
+BTN_HISTORY = "🕘 Історія"            # -> overview.history
+BTN_TEXTS = "✏️ Тексти"               # -> texts.show
+BTN_CANCEL = "❌ Скасувати"           # -> menu.cancel
 BTN_HELP = "❓ Довідка"               # -> menu.start (повторно)
 
-MAIN_KEYBOARD: ReplyKeyboardMarkup  # надсилається в /start, /help
+MAIN_KEYBOARD: ReplyKeyboardMarkup  # /start, /help і whats_new.job_announce
 ```
 
-`on_button` скидає `custom.reset_state` перед диспетчеризацією для
-всіх кнопок, крім `BTN_CUSTOM`/`BTN_CANCEL` (самі керують станом).
+`on_button` для будь-якої кнопки, крім `BTN_CANCEL`, спершу викликає
+`input_state.clear_all` (і `custom.start` сам починає з чистого стану).
+
+## Групи хендлерів (__main__.py)
+
+| Група | Хендлер | Навіщо |
+|---|---|---|
+| -1 | `TypeHandler(Update, access.remember_admin)` | нікнейм адміна в `admin_names` |
+| 0 | команди, callback-и, `menu.on_button`, `custom.on_text` | основна обробка |
+| 1 | `scheduler.on_text` | довільний час публікації прев'ю |
+| 2 | `published.on_text` | новий текст для повідомлення в General |
+| 3 | `texts.on_text` | текст нового/зміненого варіанта |
+
+Джоби поверх `scheduler.register`: `health.job_check_recovery` (раз/хв),
+`whats_new.job_announce` (`run_once`, 10 с).
