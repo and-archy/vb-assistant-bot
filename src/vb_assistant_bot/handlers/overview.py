@@ -85,6 +85,12 @@ def _errors_line(bot_data: dict, config: Config) -> str:
     state = health.error_state(bot_data)
     if state is None:
         return "🛠 Помилки в боті: немає."
+    if state.get("network_only"):
+        return (
+            f"🛠 Збої зв'язку з Telegram: {state['count']} з "
+            f"{_hhmm(state['first'], config.timezone)}, остання о "
+            f"{_hhmm(state['last'], config.timezone)} — бот повторює запити сам."
+        )
     return (
         f"🛠 Помилки в боті: ⚠️ {state['count']} з {_hhmm(state['first'], config.timezone)}, "
         f"остання о {_hhmm(state['last'], config.timezone)} — чекаю відновлення."

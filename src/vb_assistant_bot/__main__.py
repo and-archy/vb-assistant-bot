@@ -3,7 +3,7 @@ import logging.handlers
 import os
 
 from telegram import Update
-from telegram.error import TelegramError
+from telegram.error import NetworkError, TelegramError
 from telegram.ext import (
     ApplicationBuilder,
     CallbackQueryHandler,
@@ -44,8 +44,14 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Без цього необроблена помилка в будь-якому хендлері/джобі просто
     логувалась і зникала — жоден адмін не дізнавався, що бот щось не
     зробив (інцидент 2026-09-17: /support мовчав при збої)."""
+    if update is None and isinstance(context.error, NetworkError):
+        # Збій getUpdates (PTB сам повторює запит): «⚠️» зараз однаково не
+        # дійде — про довгий збій повідомить health.job_check_recovery.
+        logger.warning("Збій зв'язку з Telegram під час отримання оновлень: %s", context.error)
+        health.record_error(context.bot_data, network=True, error_text=str(context.error))
+        return
     logger.error("Необроблена помилка при обробці %s", update, exc_info=context.error)
-    health.record_error(context.bot_data)
+    health.record_error(context.bot_data, error_text=str(context.error))
     config: Config | None = context.bot_data.get("config")
     if config is None:
         return
@@ -53,8 +59,9 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     for admin_id in config.admin_user_ids:
         try:
             await context.bot.send_message(chat_id=admin_id, text=text)
-        except TelegramError:
-            pass
+            health.mark_delivered(context.bot_data)
+        except TelegramError as exc:
+            logger.warning("«⚠️ Помилка в боті» не дійшло адміну %s: %s", admin_id, exc)
 
 
 def main() -> None:

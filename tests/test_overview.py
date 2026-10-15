@@ -31,6 +31,15 @@ def test_status_shows_error_series(conn, config, thresholds):
     assert "⚠️ 1 з" in overview.build_status(context)
 
 
+def test_status_shows_network_blips_separately(conn, config, thresholds):
+    context = make_context(conn, config, thresholds=thresholds)
+    health.record_error(context.bot_data, network=True)
+
+    text = overview.build_status(context)
+    assert "Збої зв'язку з Telegram: 1 з" in text
+    assert "Помилки в боті" not in text
+
+
 def test_history_shows_actions_with_names(conn, config):
     db.upsert_admin_name(conn, 111, "admin1", "2026-01-01T00:00:00+00:00")
     audit.log(conn, 111, "пропустив ранкове прев'ю")
