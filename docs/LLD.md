@@ -147,6 +147,20 @@ async def on_preview_action(update, context) -> None: ...          # callback_da
 async def on_error(update, context: ContextTypes.DEFAULT_TYPE) -> None: ...
 # зареєстрований через application.add_error_handler — будь-яка
 # необроблена помилка шле ADMIN_USER_IDS "⚠️ Помилка в боті: ...".
+# 2026-10-15: update is None + NetworkError (збій getUpdates) ->
+# health.record_error(network=True), без повідомлень; решта ->
+# record_error(error_text=...), "⚠️", health.mark_delivered при успіху.
+
+# health.py
+NETWORK_SILENT_SECONDS = 300
+def record_error(bot_data, now=None, *, network=False, error_text="") -> None
+#   стан: first/last/count + network_only (усі помилки серії мережеві),
+#   delivered ("⚠️" дійшло хоч одному адміну), last_error.
+def mark_delivered(bot_data) -> None
+async def job_check_recovery(context) -> None
+#   network_only і last-first < NETWORK_SILENT_SECONDS -> тихо скинути;
+#   network_only, довше -> "⚠️ Не було зв'язку з Telegram з … до …";
+#   інакше "✅ …" (+ "Помилка: …", якщо не delivered).
 ```
 
 ## Callback data формат

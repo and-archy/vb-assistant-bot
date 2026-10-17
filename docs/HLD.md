@@ -378,6 +378,20 @@ seconds`). Виправлено на двох рівнях: `poll_alerts` вин
   `bot_data`); `job_check_recovery` (раз/хв) після 3 хв тиші й успішного
   `get_me` шле «✅ Бот знову працює…». Стан у `bot_data` (а не БД):
   після рестарту процесу серії помилок уже немає.
+- **Мережеві збої polling (2026-10-15).** PTB `run_polling` передає
+  `NetworkError` з `getUpdates` у `process_error(update=None)` → наш
+  `on_error`, і сам повторює запит (1 с, ×1.5, до 30 с). Тому
+  `on_error` розрізняє: `update is None and isinstance(error,
+  NetworkError)` — мережевий збій polling: лише `record_error(...,
+  network=True)` і WARNING у лог, без спроби слати «⚠️» (мережі все
+  одно немає — раніше `TelegramError` при відправці мовчки
+  ковтався). Будь-яка інша помилка знімає з серії позначку
+  `network_only`, шле «⚠️» і запам'ятовує, чи дійшло (`delivered`) та
+  текст (`last_error`). `job_check_recovery` для серії `network_only`:
+  тривалість `last − first` < `NETWORK_SILENT_SECONDS` (300) — тихо
+  скидає стан (INFO у лог); інакше — одне «⚠️ Не було зв'язку з
+  Telegram з … до …». Для звичайної серії — «✅ …», плюс рядок
+  «Помилка: …», якщо «⚠️» не дійшло.
 - `alerts_health`: `poll_alerts` викликає `on_poll_success` /
   `on_poll_failure`; стан у `bot_state` (переживає рестарт).
   `stale_warning` додається до `stats_intro` прев'ю, якщо останнє

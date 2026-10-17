@@ -19,16 +19,43 @@ _ERROR_STATE_KEY = "error_state"
 # між двома помилками однієї серії.
 RECOVERY_QUIET_SECONDS = 180
 CHECK_INTERVAL_SECONDS = 60
+# Збій зв'язку з Telegram під час отримання оновлень, коротший за це, —
+# без повідомлень (щонічний розрив на кілька секунд о 4:10, 2026-10-15):
+# PTB сам повторює запит, а «⚠️» під час збою все одно не доходить.
+NETWORK_SILENT_SECONDS = 300
 
 
-def record_error(bot_data: dict, now: datetime | None = None) -> None:
+def record_error(
+    bot_data: dict,
+    now: datetime | None = None,
+    *,
+    network: bool = False,
+    error_text: str = "",
+) -> None:
     now = now or datetime.now(UTC)
     state = bot_data.get(_ERROR_STATE_KEY)
     if state is None:
-        bot_data[_ERROR_STATE_KEY] = {"first": now, "last": now, "count": 1}
+        bot_data[_ERROR_STATE_KEY] = {
+            "first": now,
+            "last": now,
+            "count": 1,
+            "network_only": network,
+            "delivered": False,
+            "last_error": error_text,
+        }
         return
     state["last"] = now
     state["count"] += 1
+    state["network_only"] = state.get("network_only", False) and network
+    if error_text:
+        state["last_error"] = error_text
+
+
+def mark_delivered(bot_data: dict) -> None:
+    """«⚠️ Помилка в боті» дійшло хоч одному адміну."""
+    state = bot_data.get(_ERROR_STATE_KEY)
+    if state is not None:
+        state["delivered"] = True
 
 
 def error_state(bot_data: dict) -> dict | None:
@@ -62,11 +89,29 @@ async def job_check_recovery(context: ContextTypes.DEFAULT_TYPE) -> None:
     first = _format_local(state["first"], config.timezone)
     last = _format_local(state["last"], config.timezone)
     period = first if first == last else f"{first}–{last}"
-    text = (
-        "✅ Бот знову працює в штатному режимі — помилок немає вже "
-        f"{RECOVERY_QUIET_SECONDS // 60} хв.\n"
-        f"Було помилок: {state['count']} ({period})."
-    )
+    if state.get("network_only"):
+        outage = (state["last"] - state["first"]).total_seconds()
+        if outage < NETWORK_SILENT_SECONDS:
+            context.bot_data.pop(_ERROR_STATE_KEY, None)
+            logger.info(
+                "Короткий збій зв'язку з Telegram (%s, %s спроб) — без повідомлення",
+                period,
+                state["count"],
+            )
+            return
+        text = (
+            f"⚠️ Не було зв'язку з Telegram з {first} до {last} "
+            f"({state['count']} невдалих спроб). Зараз бот працює штатно."
+        )
+    else:
+        text = (
+            "✅ Бот знову працює в штатному режимі — помилок немає вже "
+            f"{RECOVERY_QUIET_SECONDS // 60} хв.\n"
+            f"Було помилок: {state['count']} ({period})."
+        )
+        if not state.get("delivered") and state.get("last_error"):
+            # «⚠️» не дійшло — інакше адмін не дізнається, що саме сталося.
+            text += f"\nПомилка: {state['last_error']}"
     delivered = False
     for admin_id in config.admin_user_ids:
         try:
