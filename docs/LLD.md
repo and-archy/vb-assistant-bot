@@ -199,6 +199,16 @@ cancel}` — дозволені залежно від поточного `status
 `context.user_data["custom_step"]` у `await_edit_text`/`await_edit_time`,
 фактична зміна — наступним текстовим повідомленням від того ж адміна.
 
+## Callback data формат — регулярні (2026-10-28+)
+
+`rec:new` — почати нове; `rec:days:<0..6|wd|monfri|all|ok>` — вибір днів
+(працює лише на кроці `pick_days`, дані — у `RECURRING_DRAFT`, `wd` =
+`'workdays'`); `rec:<id>:<action>`, `<action>` ∈ `{show, pause, resume,
+edit_text, edit_media, edit_days, edit_time, del, del_yes, del_no}` —
+для `status != 'deleted'`. `pause`/`resume`/`del_yes` діють одразу;
+`edit_*` ставлять крок вводу; `del` лише міняє клавіатуру того, хто
+натиснув, на підтвердження.
+
 ## Команди
 
 | Команда | Доступ | Дія |
@@ -213,6 +223,7 @@ cancel}` — дозволені залежно від поточного `status
 | `/scheduled` | адміни | `overview.scheduled` — копії всіх запланованих з кнопками |
 | `/history` | адміни | `overview.history` — `action_log` за 7 днів |
 | `/texts` | адміни | `texts.show` — керування варіантами текстів |
+| `/recurring` | адміни | `recurring.show` — регулярні повідомлення з кнопками + «➕ Нове» |
 
 Групу General бот не гейтить — жодних `MessageHandler` на текст
 учасників, лише `bot.send_message(GROUP_CHAT_ID, ...)`. Виняток —
@@ -227,6 +238,7 @@ cancel}` — дозволені залежно від поточного `status
 BTN_SUPPORT = "🌅 Прев'ю зараз"      # -> support.support
 BTN_CUSTOM = "📝 Своє повідомлення"   # -> custom.start
 BTN_SCHEDULED = "🗓 Заплановані"      # -> overview.scheduled
+BTN_RECURRING = "🔁 Регулярні"        # -> recurring.show
 BTN_STATUS = "📋 Статус"              # -> overview.status
 BTN_WEEKEND = "🌴 Вихідний сьогодні"  # -> weekend.mark_weekend, context.args=[]
 BTN_WORKDAY = "💼 Робочий сьогодні"   # -> weekend.mark_workday, context.args=[]
@@ -250,6 +262,7 @@ MAIN_KEYBOARD: ReplyKeyboardMarkup  # /start, /help і whats_new.job_announce
 | 1 | `scheduler.on_text` | довільний час публікації прев'ю |
 | 2 | `published.on_text` | новий текст для повідомлення в General |
 | 3 | `texts.on_text` | текст нового/зміненого варіанта |
+| 4 | `recurring.on_text`, `recurring.on_media` | текст / фото / файл / час регулярного повідомлення |
 
 Джоби поверх `scheduler.register`: `health.job_check_recovery` (раз/хв),
-`whats_new.job_announce` (`run_once`, 10 с).
+`whats_new.job_announce` (`run_once`, 10 с), `recurring.job_dispatch` (раз/хв).

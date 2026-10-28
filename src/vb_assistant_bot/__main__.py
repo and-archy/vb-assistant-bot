@@ -19,7 +19,16 @@ from vb_assistant_bot.access import remember_admin
 from vb_assistant_bot.alerts_client import AlertsInUaClient
 from vb_assistant_bot.config import Config, load_config
 from vb_assistant_bot.content import load_texts, load_thresholds
-from vb_assistant_bot.handlers import custom, menu, overview, published, support, texts, weekend
+from vb_assistant_bot.handlers import (
+    custom,
+    menu,
+    overview,
+    published,
+    recurring,
+    support,
+    texts,
+    weekend,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,10 +104,12 @@ def main() -> None:
     application.add_handler(CommandHandler("scheduled", overview.scheduled))
     application.add_handler(CommandHandler("history", overview.history))
     application.add_handler(CommandHandler("texts", texts.show))
+    application.add_handler(CommandHandler("recurring", recurring.show))
     application.add_handler(CallbackQueryHandler(scheduler.on_preview_action, pattern=r"^prev:"))
     application.add_handler(CallbackQueryHandler(custom.on_action, pattern=r"^custom:"))
     application.add_handler(CallbackQueryHandler(published.on_action, pattern=r"^pub:"))
     application.add_handler(CallbackQueryHandler(texts.on_action, pattern=r"^txt:"))
+    application.add_handler(CallbackQueryHandler(recurring.on_action, pattern=r"^rec:"))
     # Кнопки — ПЕРЕД загальним текстовим хендлером: у межах однієї групи
     # PTB зупиняється на першому хендлері, чий фільтр збігся, тож
     # натискання кнопки ніколи не потрапляє в custom.on_text.
@@ -118,10 +129,24 @@ def main() -> None:
         MessageHandler(filters.TEXT & ~filters.COMMAND, published.on_text), group=2
     )
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, texts.on_text), group=3)
+    # Регулярні повідомлення: текст і фото/файл (вміст, заміна фото) — у
+    # своїй групі; фото/файл не збігаються з жодним TEXT-фільтром вище.
+    application.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, recurring.on_text), group=4
+    )
+    application.add_handler(
+        MessageHandler(
+            filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.ALL), recurring.on_media
+        ),
+        group=4,
+    )
     application.add_error_handler(on_error)
 
     scheduler.register(application, config, thresholds)
     application.job_queue.run_once(whats_new.job_announce, when=10)
+    application.job_queue.run_repeating(
+        recurring.job_dispatch, interval=recurring.POLL_SECONDS, first=20
+    )
     application.job_queue.run_repeating(
         health.job_check_recovery,
         interval=health.CHECK_INTERVAL_SECONDS,

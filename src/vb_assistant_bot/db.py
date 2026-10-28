@@ -139,6 +139,37 @@ CREATE TABLE IF NOT EXISTS custom_message_previews (
     message_id        INTEGER NOT NULL,
     PRIMARY KEY (custom_message_id, chat_id)
 );
+
+-- Регулярні повідомлення (2026-10-28): той самий текст / фото / файл у
+-- General в обрані дні тижня о фіксованому часі (напр. «Золоті години»
+-- пн–пт о 10:00) — handlers/recurring.py.
+CREATE TABLE IF NOT EXISTS recurring_posts (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    text               TEXT NOT NULL DEFAULT '',  -- текст або підпис до фото/файлу
+    media_type         TEXT,            -- NULL / 'photo' / 'document'
+    file_id            TEXT,            -- Telegram file_id — бот шле повторно без завантаження
+    file_name          TEXT,            -- назва файлу (лише для вигляду адмінам)
+    days               TEXT NOT NULL,   -- 'workdays' або цифри днів тижня (пн=0): '01234'
+    post_time          TEXT NOT NULL,   -- 'гг:хх' за TIMEZONE
+    status             TEXT NOT NULL,   -- active/paused/deleted
+    -- Коли востаннє змінено дні/час чи знято з паузи (UTC ISO): слот,
+    -- що вже минув на цей момент, сьогодні не наздоганяється.
+    schedule_set_at    TEXT NOT NULL,
+    last_sent_on       TEXT,            -- локальна дата останньої публікації
+    last_sent_at       TEXT,            -- канонічний UTC ISO8601
+    publish_failed_on  TEXT,            -- локальна дата, коли адмінам повідомлено про збій
+    created_by         INTEGER NOT NULL,
+    created_at         TEXT NOT NULL,
+    updated_by         INTEGER,
+    updated_at         TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS recurring_post_previews (
+    recurring_post_id INTEGER NOT NULL REFERENCES recurring_posts (id) ON DELETE CASCADE,
+    chat_id           INTEGER NOT NULL,
+    message_id        INTEGER NOT NULL,
+    PRIMARY KEY (recurring_post_id, chat_id)
+);
 """
 
 
@@ -743,3 +774,132 @@ def upsert_text_variant(
 def delete_text_variant(conn: sqlite3.Connection, variant_id: str) -> None:
     conn.execute("DELETE FROM text_variants WHERE variant_id = ?", (variant_id,))
     conn.commit()
+
+
+# --- recurring posts --------------------------------------------------------------
+
+# Колонки, які може змінювати update_recurring_post (решта — лише
+# спеціальними функціями нижче).
+_RECURRING_EDITABLE = frozenset(
+    {"text", "media_type", "file_id", "file_name", "days", "post_time", "status", "schedule_set_at"}
+)
+
+
+def create_recurring_post(
+    conn: sqlite3.Connection,
+    *,
+    text: str,
+    media_type: str | None,
+    file_id: str | None,
+    file_name: str | None,
+    days: str,
+    post_time: str,
+    created_by: int,
+    created_at: str,
+) -> int:
+    cursor = conn.execute(
+        """
+        INSERT INTO recurring_posts
+            (text, media_type, file_id, file_name, days, post_time, status,
+             schedule_set_at, created_by, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)
+        """,
+        (
+            text,
+            media_type,
+            file_id,
+            file_name,
+            days,
+            post_time,
+            created_at,
+            created_by,
+            created_at,
+            created_at,
+        ),
+    )
+    conn.commit()
+    return cursor.lastrowid
+
+
+def get_recurring_post(conn: sqlite3.Connection, recurring_post_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM recurring_posts WHERE id = ?", (recurring_post_id,)
+    ).fetchone()
+
+
+def recurring_posts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Усі, крім видалених."""
+    return conn.execute(
+        "SELECT * FROM recurring_posts WHERE status != 'deleted' ORDER BY post_time, id"
+    ).fetchall()
+
+
+def active_recurring_posts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM recurring_posts WHERE status = 'active' ORDER BY post_time, id"
+    ).fetchall()
+
+
+def update_recurring_post(
+    conn: sqlite3.Connection,
+    recurring_post_id: int,
+    *,
+    updated_by: int | None,
+    updated_at: str,
+    **fields,
+) -> None:
+    unknown = set(fields) - _RECURRING_EDITABLE
+    if unknown:
+        raise ValueError(f"Не можна змінювати колонки recurring_posts: {sorted(unknown)}")
+    assignments = ", ".join(f"{column} = ?" for column in fields)
+    conn.execute(
+        f"UPDATE recurring_posts SET {assignments}, updated_by = ?, updated_at = ? "  # noqa: S608
+        "WHERE id = ?",
+        (*fields.values(), updated_by, updated_at, recurring_post_id),
+    )
+    conn.commit()
+
+
+def mark_recurring_post_sent(
+    conn: sqlite3.Connection, recurring_post_id: int, sent_on: str, sent_at: str
+) -> None:
+    conn.execute(
+        """
+        UPDATE recurring_posts
+        SET last_sent_on = ?, last_sent_at = ?, publish_failed_on = NULL
+        WHERE id = ?
+        """,
+        (sent_on, sent_at, recurring_post_id),
+    )
+    conn.commit()
+
+
+def set_recurring_post_failed_on(
+    conn: sqlite3.Connection, recurring_post_id: int, failed_on: str | None
+) -> None:
+    conn.execute(
+        "UPDATE recurring_posts SET publish_failed_on = ? WHERE id = ?",
+        (failed_on, recurring_post_id),
+    )
+    conn.commit()
+
+
+def add_recurring_post_preview(
+    conn: sqlite3.Connection, recurring_post_id: int, chat_id: int, message_id: int
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO recurring_post_previews (recurring_post_id, chat_id, message_id)
+        VALUES (?, ?, ?)
+        ON CONFLICT (recurring_post_id, chat_id) DO UPDATE SET message_id = excluded.message_id
+        """,
+        (recurring_post_id, chat_id, message_id),
+    )
+    conn.commit()
+
+
+def recurring_post_previews(conn: sqlite3.Connection, recurring_post_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT chat_id, message_id FROM recurring_post_previews WHERE recurring_post_id = ?",
+        (recurring_post_id,),
+    ).fetchall()

@@ -4,11 +4,12 @@ from telegram.ext import ContextTypes
 from vb_assistant_bot import input_state
 from vb_assistant_bot.access import ensure_admin
 from vb_assistant_bot.config import Config
-from vb_assistant_bot.handlers import custom, overview, support, texts, weekend
+from vb_assistant_bot.handlers import custom, overview, recurring, support, texts, weekend
 
 BTN_SUPPORT = "🌅 Прев'ю зараз"
 BTN_CUSTOM = "📝 Своє повідомлення"
 BTN_SCHEDULED = "🗓 Заплановані"
+BTN_RECURRING = "🔁 Регулярні"
 BTN_STATUS = "📋 Статус"
 BTN_WEEKEND = "🌴 Вихідний сьогодні"
 BTN_WORKDAY = "💼 Робочий сьогодні"
@@ -21,6 +22,7 @@ BUTTON_LABELS = (
     BTN_SUPPORT,
     BTN_CUSTOM,
     BTN_SCHEDULED,
+    BTN_RECURRING,
     BTN_STATUS,
     BTN_WEEKEND,
     BTN_WORKDAY,
@@ -33,7 +35,8 @@ BUTTON_LABELS = (
 MAIN_KEYBOARD = ReplyKeyboardMarkup(
     [
         [BTN_SUPPORT, BTN_CUSTOM],
-        [BTN_SCHEDULED, BTN_STATUS],
+        [BTN_SCHEDULED, BTN_RECURRING],
+        [BTN_STATUS],
         [BTN_WEEKEND, BTN_WORKDAY],
         [BTN_HISTORY, BTN_TEXTS],
         [BTN_CANCEL, BTN_HELP],
@@ -55,6 +58,9 @@ HELP_TEXT = (
     "General на обрані дату й час.\n"
     f"{BTN_SCHEDULED} — усе, що чекає на публікацію, з кнопками Скасувати / "
     "Змінити.\n"
+    f"{BTN_RECURRING} — повідомлення, які бот сам публікує в General в обрані дні "
+    "о фіксованому часі (текст, фото чи файл з підписом): створити, змінити текст, "
+    "фото, дні чи час, поставити на паузу, подивитися, як виглядатиме.\n"
     f"{BTN_STATUS} — стан бота одним екраном: тип дня, прев'ю, автопублікація, "
     "свіжість даних про тривоги, заплановане, помилки.\n"
     f"{BTN_WEEKEND} / {BTN_WORKDAY} — позначити СЬОГОДНІ вихідним/робочим "
@@ -72,7 +78,7 @@ HELP_TEXT = (
     "може бути неповною), своє повідомлення не вдалося опублікувати, або "
     "сталася помилка — і повідомить, коли все знову гаразд.\n\n"
     "Ті самі дії працюють і командами: /support, /custom, /markweekend, "
-    "/markworkday, /cancel, /status, /scheduled, /history, /texts."
+    "/markworkday, /cancel, /status, /scheduled, /recurring, /history, /texts."
 )
 
 
@@ -90,7 +96,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """«Скасувати» / /cancel — скидає будь-який незавершений ввід (текст чи
     час свого повідомлення, час публікації прев'ю, виправлення тексту в
-    General, текст варіанта)."""
+    General, текст варіанта, кроки регулярного повідомлення)."""
     config: Config = context.bot_data["config"]
     if not await ensure_admin(update, config):
         return
@@ -123,6 +129,8 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await custom.start(update, context)
     elif text == BTN_SCHEDULED:
         await overview.scheduled(update, context)
+    elif text == BTN_RECURRING:
+        await recurring.show(update, context)
     elif text == BTN_STATUS:
         await overview.status(update, context)
     elif text == BTN_WEEKEND:

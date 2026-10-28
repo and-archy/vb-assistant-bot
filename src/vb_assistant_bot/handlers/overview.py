@@ -1,4 +1,5 @@
-"""Кнопки лише для перегляду: «📋 Статус», «🗓 Заплановані», «🕘 Історія»."""
+"""Кнопки лише для перегляду: «📋 Статус», «🗓 Заплановані», «🕘 Історія».
+Регулярні повідомлення — окремо, «🔁 Регулярні» (handlers/recurring.py)."""
 
 import logging
 from datetime import datetime
@@ -12,7 +13,7 @@ from vb_assistant_bot import alerts_health, audit, db, health, scheduler
 from vb_assistant_bot.access import admin_label, ensure_admin
 from vb_assistant_bot.config import Config
 from vb_assistant_bot.content import Thresholds
-from vb_assistant_bot.handlers import custom
+from vb_assistant_bot.handlers import custom, recurring
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +82,23 @@ def _custom_line(conn, config: Config) -> str:
     )
 
 
+def _recurring_line(conn, config: Config) -> str:
+    posts = db.recurring_posts(conn)
+    if not posts:
+        return "🔁 Регулярні повідомлення: немає."
+    now = datetime.now(ZoneInfo(config.timezone))
+    active = [p for p in posts if p["status"] == "active"]
+    paused = len(posts) - len(active)
+    upcoming = [run for p in active if (run := recurring.next_run(conn, p, now)) is not None]
+    parts = [f"активних {len(active)}"]
+    if paused:
+        parts.append(f"на паузі {paused}")
+    if upcoming:
+        nearest = min(upcoming)
+        parts.append(f"найближче {nearest:%d.%m} о {nearest.hour}:{nearest.minute:02d}")
+    return f"🔁 Регулярні повідомлення: {', '.join(parts)}."
+
+
 def _errors_line(bot_data: dict, config: Config) -> str:
     state = health.error_state(bot_data)
     if state is None:
@@ -111,6 +129,7 @@ def build_status(context: ContextTypes.DEFAULT_TYPE) -> str:
         _autopublish_line(config, thresholds),
         alerts_health.status_line(conn, config.timezone),
         _custom_line(conn, config),
+        _recurring_line(conn, config),
         _errors_line(context.bot_data, config),
     ]
     return "\n".join(line for line in lines if line)
