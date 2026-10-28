@@ -440,7 +440,42 @@ seconds`). Виправлено на двох рівнях: `poll_alerts` вин
 ## [16] Один активний ввід — input_state.py
 
 Текстові хендлери живуть у різних групах PTB (custom — 0, час прев'ю —
-1, виправлення в General — 2, тексти — 3), тож одне повідомлення
+1, виправлення в General — 2, тексти — 3, регулярні — 4), тож одне повідомлення
 могли б зчитати кілька. Тому кожен потік вводу перед стартом викликає
 `input_state.clear_all`, будь-яка кнопка меню (крім «Скасувати») теж,
 а «❌ Скасувати» / `/cancel` (`menu.cancel`) скидає будь-який ввід.
+
+## [17] Регулярні повідомлення — handlers/recurring.py (2026-10-28)
+
+```sql
+CREATE TABLE recurring_posts (
+    id, text /* текст або підпис */, media_type /* NULL/photo/document */,
+    file_id /* Telegram file_id — без зберігання файлу на сервері */, file_name,
+    days /* 'workdays' | цифри пн=0: '01234' */, post_time /* 'гг:хх' TIMEZONE */,
+    status /* active/paused/deleted */,
+    schedule_set_at /* UTC: коли змінено дні/час або знято з паузи */,
+    last_sent_on /* локальна дата */, last_sent_at, publish_failed_on /* локальна дата */,
+    created_by, created_at, updated_by, updated_at
+);
+CREATE TABLE recurring_post_previews (recurring_post_id, chat_id, message_id);
+```
+
+- Ввід — стейт `input_state.RECURRING_STEP` + чернетка
+  `RECURRING_DRAFT` (`await_content → [await_caption] → pick_days →
+  await_time`; зміни — `await_edit_text|media|time` або `pick_days` з
+  `edit_id`). Текст — `recurring.on_text` (група 4), фото/файл —
+  `recurring.on_media` (`filters.ChatType.PRIVATE & (PHOTO |
+  Document.ALL)`, теж група 4; жоден TEXT-фільтр інших груп їх не
+  ловить). Фото/файл поза цими кроками бот ігнорує.
+- `file_id` з повідомлення адміна бот може слати повторно в будь-який
+  чат — сам файл не зберігаємо й не завантажуємо.
+- `job_dispatch` (`run_repeating`, 60 с, реєструється в `__main__`, не
+  в `scheduler.register` — `recurring` імпортує `scheduler`
+  заради `determine_day_type`) публікує, коли `is_due`: день підходить,
+  `slot <= now < slot + CATCH_UP` (60 хв), `last_sent_on != сьогодні`,
+  `slot >= schedule_set_at`. Поллер, а не `run_daily` на кожне
+  повідомлення: розклад змінюється з бота на льоту й переживає рестарт
+  без перереєстрації джоб, а наздоганяння після простою — та сама умова.
+- `_broadcast` / «живі» копії — як у [9]; після кожної публікації вигляд
+  оновлюється («Востаннє опубліковано: …», «Наступна публікація: …»).
+- `next_run` — для вигляду, підтвердження й рядка «📋 Статус».
