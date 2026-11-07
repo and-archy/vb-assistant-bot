@@ -11,7 +11,8 @@ CREATE TABLE IF NOT EXISTS alerts (
     threat_types  TEXT NOT NULL DEFAULT '[]',
     started_at    TEXT NOT NULL,
     finished_at   TEXT,
-    updated_at    TEXT NOT NULL
+    updated_at    TEXT NOT NULL,
+    last_seen_at  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_alerts_location_started
@@ -211,6 +212,8 @@ def init_db(db_path: str) -> sqlite3.Connection:
         conn.execute(
             "ALTER TABLE custom_messages ADD COLUMN publish_failed INTEGER NOT NULL DEFAULT 0"
         )
+    if not _column_exists(conn, "alerts", "last_seen_at"):
+        conn.execute("ALTER TABLE alerts ADD COLUMN last_seen_at TEXT")
     conn.commit()
     return conn
 
@@ -229,20 +232,25 @@ def upsert_alert(
     started_at: str,
     finished_at: str | None,
     updated_at: str,
+    seen_at: str | None = None,
 ) -> None:
+    """seen_at — момент опитування, в якому запис прийшов з API
+    (`last_seen_at`). Потрібен `close_vanished_ongoing_alerts`, щоб закрити
+    тривогу, яка зникла з API, не дочекавшись finished_at."""
     conn.execute(
         """
         INSERT INTO alerts
             (external_id, location_uid, raw_alert_type, alert_level, threat_types,
-             started_at, finished_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             started_at, finished_at, updated_at, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (external_id) DO UPDATE SET
             raw_alert_type = excluded.raw_alert_type,
             alert_level    = excluded.alert_level,
             threat_types   = excluded.threat_types,
             started_at     = excluded.started_at,
             finished_at    = excluded.finished_at,
-            updated_at     = excluded.updated_at
+            updated_at     = excluded.updated_at,
+            last_seen_at   = COALESCE(excluded.last_seen_at, alerts.last_seen_at)
         """,
         (
             external_id,
@@ -253,9 +261,46 @@ def upsert_alert(
             started_at,
             finished_at,
             updated_at,
+            seen_at,
         ),
     )
     conn.commit()
+
+
+def close_vanished_ongoing_alerts(
+    conn: sqlite3.Connection, seen_external_ids: set[str]
+) -> list[str]:
+    """Інцидент 2026-11-01/02: три червоні тривоги (315982, 316010, 316011)
+    прийшли з alerts.in.ua як активні (finished_at = null), а потім API
+    прибрав їх з month_ago.json, не віддавши finished_at. Бот робив лише
+    upsert, тож у БД вони лишились "активними" назавжди — і кожну ніч
+    рахувались як тривога до кінця вікна (25 год за 9-годинну ніч).
+
+    Викликається ЛИШЕ після успішного опитування з непорожньою відповіддю:
+    поки сервер без світла/інтернету, опитувань немає — і нічого не
+    закривається. Коли зв'язок повертається, тривоги, що завершились за
+    час простою, API віддає з finished_at (звичайний upsert). Закриваються
+    тільки ті, яких у відповіді вже НЕМАЄ — на момент `last_seen_at`
+    (останній раз, коли API їх реально показував), а не на момент
+    відновлення зв'язку, щоб простій не роздував тривалість.
+
+    Повертає external_id закритих записів (для логу)."""
+    rows = conn.execute(
+        "SELECT external_id, started_at, updated_at, last_seen_at FROM alerts "
+        "WHERE finished_at IS NULL"
+    ).fetchall()
+    closed = []
+    for row in rows:
+        if row["external_id"] in seen_external_ids:
+            continue
+        finished_at = row["last_seen_at"] or row["updated_at"] or row["started_at"]
+        conn.execute(
+            "UPDATE alerts SET finished_at = ? WHERE external_id = ?",
+            (max(finished_at, row["started_at"]), row["external_id"]),
+        )
+        closed.append(row["external_id"])
+    conn.commit()
+    return closed
 
 
 def alerts_overlapping(

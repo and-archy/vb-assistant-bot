@@ -1,6 +1,6 @@
 import json
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -50,11 +50,56 @@ class NightStats:
 
     @property
     def missile_duration(self) -> timedelta:
-        return sum((a.duration for a in self.missile_alerts), start=timedelta())
+        return _union_duration(self.missile_alerts)
 
     @property
     def drone_duration(self) -> timedelta:
-        return sum((a.duration for a in self.drone_alerts), start=timedelta())
+        return _union_duration(self.drone_alerts)
+
+
+def _merge_same_level(alerts: list[AlertWindow]) -> list[AlertWindow]:
+    """Інцидент 2026-11-02: alerts.in.ua віддав три червоні тривоги, що
+    стартували з різницею в 2 хв (дублі однієї події), і бот додав їх
+    тривалості — "25 год 20 хв" за 9-годинну ніч. Записи ОДНОГО рівня
+    (red/yellow), що перекриваються чи стикаються, зливаються в одну
+    тривогу — так кількість, найдовша і розбивка не роздуваються дублями.
+    Різні рівні не зливаються: ракетна й дронова — окремі загрози."""
+    merged: list[AlertWindow] = []
+    for alert in sorted(alerts, key=lambda a: (a.alert_level or "", a.started_at)):
+        last = merged[-1] if merged else None
+        if (
+            last is not None
+            and last.alert_level == alert.alert_level
+            and alert.started_at <= last.finished_at
+        ):
+            merged[-1] = replace(
+                last,
+                finished_at=max(last.finished_at, alert.finished_at),
+                threat_types=tuple(dict.fromkeys(last.threat_types + alert.threat_types)),
+                ongoing=last.ongoing or alert.ongoing,
+            )
+        else:
+            merged.append(alert)
+    merged.sort(key=lambda a: a.started_at)
+    return merged
+
+
+def _union_duration(alerts: list[AlertWindow] | tuple[AlertWindow, ...]) -> timedelta:
+    """Час, коли діяла хоча б одна тривога: перекриття (наприклад,
+    дронова всередині ракетної) рахується один раз — сума ніколи не
+    перевищить вікно ночі."""
+    total = timedelta()
+    current_start = current_end = None
+    for alert in sorted(alerts, key=lambda a: a.started_at):
+        if current_end is None or alert.started_at > current_end:
+            if current_end is not None:
+                total += current_end - current_start
+            current_start, current_end = alert.started_at, alert.finished_at
+        else:
+            current_end = max(current_end, alert.finished_at)
+    if current_end is not None:
+        total += current_end - current_start
+    return total
 
 
 def _localize(d: date, t: time, tz: ZoneInfo) -> datetime:
@@ -90,11 +135,7 @@ def compute_night_stats(
         window_end.astimezone(utc).isoformat(),
     )
 
-    alerts: list[AlertWindow] = []
-    total_duration = timedelta()
-    longest: AlertWindow | None = None
-    has_ballistic = False
-
+    raw_alerts: list[AlertWindow] = []
     for row in rows:
         raw_start = parse_api_datetime(row["started_at"])
         ongoing = row["finished_at"] is None
@@ -105,21 +146,26 @@ def compute_night_stats(
         if clipped_end <= clipped_start:
             continue
 
-        alert = AlertWindow(
-            started_at=clipped_start,
-            finished_at=clipped_end,
-            alert_level=row["alert_level"],
-            threat_types=tuple(json.loads(row["threat_types"] or "[]")),
-            ongoing=ongoing,
-            crosses_hard_window=clipped_start < hard_end and clipped_end > hard_start,
+        raw_alerts.append(
+            AlertWindow(
+                started_at=clipped_start,
+                finished_at=clipped_end,
+                alert_level=row["alert_level"],
+                threat_types=tuple(json.loads(row["threat_types"] or "[]")),
+                ongoing=ongoing,
+                crosses_hard_window=False,
+            )
         )
-        alerts.append(alert)
-        total_duration += alert.duration
-        if longest is None or alert.duration > longest.duration:
-            longest = alert
 
-        if any(t in thresholds.ballistic_threat_types for t in alert.threat_types):
-            has_ballistic = True
+    alerts = [
+        replace(a, crosses_hard_window=a.started_at < hard_end and a.finished_at > hard_start)
+        for a in _merge_same_level(raw_alerts)
+    ]
+    longest = max(alerts, key=lambda a: a.duration, default=None)
+    total_duration = _union_duration(alerts)
+    has_ballistic = any(
+        t in thresholds.ballistic_threat_types for a in alerts for t in a.threat_types
+    )
 
     return NightStats(
         morning_date=morning_date,

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 from vb_assistant_bot import db
 from vb_assistant_bot.night_logic import compute_night_stats, is_heavy_night
@@ -135,3 +135,57 @@ def test_breakdown_empty_when_alert_level_missing(conn, thresholds):
 
     assert stats.missile_alerts == ()
     assert stats.drone_alerts == ()
+
+
+def test_overlapping_duplicate_alerts_are_merged_not_summed(conn, thresholds):
+    """Інцидент 2026-11-02: три червоні дублі з різницею в 2 хв давали
+    "25 год 20 хв" за 9-годинну ніч. Мають злитись в одну тривогу."""
+    _add_alert(
+        conn, "r1", "2026-01-14T20:47:00+00:00", "2026-01-15T05:00:00+00:00", alert_level="red"
+    )
+    _add_alert(
+        conn, "r2", "2026-01-14T20:49:00+00:00", "2026-01-15T05:00:00+00:00", alert_level="red"
+    )
+    _add_alert(
+        conn, "r3", "2026-01-14T20:49:02+00:00", "2026-01-15T04:00:00+00:00", alert_level="red"
+    )
+    stats = _stats(conn, thresholds)
+    assert stats.count == 1
+    assert len(stats.missile_alerts) == 1
+    assert stats.missile_duration == timedelta(hours=8, minutes=13)
+    assert stats.total_duration == timedelta(hours=8, minutes=13)
+    assert stats.total_duration <= stats.window_end - stats.window_start
+
+
+def test_overlapping_different_levels_counted_once_in_total(conn, thresholds):
+    # Дронова (yellow) всередині ракетної (red): окремі тривоги в розбивці,
+    # але "сумарно" — час під будь-якою тривогою, без подвійного рахунку.
+    _add_alert(
+        conn, "r1", "2026-01-14T21:00:00+00:00", "2026-01-14T23:00:00+00:00", alert_level="red"
+    )
+    _add_alert(
+        conn, "y1", "2026-01-14T21:30:00+00:00", "2026-01-14T22:00:00+00:00", alert_level="yellow"
+    )
+    stats = _stats(conn, thresholds)
+    assert stats.count == 2
+    assert stats.missile_duration == timedelta(hours=2)
+    assert stats.drone_duration == timedelta(minutes=30)
+    assert stats.total_duration == timedelta(hours=2)
+
+
+def test_merged_duplicates_keep_threat_types(conn, thresholds):
+    _add_alert(
+        conn, "r1", "2026-01-14T21:00:00+00:00", "2026-01-14T21:30:00+00:00", alert_level="red"
+    )
+    _add_alert(
+        conn,
+        "r2",
+        "2026-01-14T21:10:00+00:00",
+        "2026-01-14T21:40:00+00:00",
+        threat_types=["ballistic_missiles"],
+        alert_level="red",
+    )
+    stats = _stats(conn, thresholds)
+    assert stats.count == 1
+    assert stats.has_ballistic is True
+    assert stats.longest.duration == timedelta(minutes=40)
