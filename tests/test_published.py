@@ -1,5 +1,5 @@
 import asyncio
-from datetime import date
+from datetime import UTC, date, datetime
 
 from helpers import make_context, make_update
 from telegram.error import BadRequest
@@ -113,7 +113,7 @@ def test_edit_and_delete_published_custom_message(conn, config):
     custom_id = db.create_custom_message(
         conn,
         text="старе",
-        scheduled_at="2020-01-01T00:00:00+00:00",
+        scheduled_at=datetime.now(UTC).isoformat(),
         created_by=111,
         created_at="2020-01-01T00:00:00+00:00",
     )

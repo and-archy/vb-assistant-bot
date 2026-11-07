@@ -1,4 +1,5 @@
 import asyncio
+from datetime import UTC, datetime
 
 from helpers import make_context, make_update
 
@@ -93,6 +94,12 @@ def test_past_datetime_rejected(conn, config):
 
     assert context.user_data["custom_step"] == "await_time"
     assert conn.execute("SELECT * FROM custom_messages").fetchone() is None
+
+
+def _just_due() -> str:
+    """Час, що вже настав, але СЬОГОДНІ — повідомлення за минулі дні бот
+    не публікує (позначає 'expired')."""
+    return datetime.now(UTC).isoformat()
 
 
 def _create_scheduled(conn, text="текст", scheduled_at=None):
@@ -193,7 +200,7 @@ def test_cancel_compose_when_nothing_pending(conn, config):
 
 def test_job_dispatch_publishes_due_messages(conn, config):
     context = make_context(conn, config)
-    custom_id = _create_scheduled(conn, text="термінове", scheduled_at=_PAST_ISO_UTC)
+    custom_id = _create_scheduled(conn, text="термінове", scheduled_at=_just_due())
 
     asyncio.run(custom.job_dispatch(context))
 
@@ -260,7 +267,7 @@ def test_job_dispatch_failure_notifies_admins_once_then_reports_success(conn, co
     from telegram.error import NetworkError
 
     context = make_context(conn, config)
-    custom_id = _create_scheduled(conn, text="важливе", scheduled_at=_PAST_ISO_UTC)
+    custom_id = _create_scheduled(conn, text="важливе", scheduled_at=_just_due())
 
     def fail_in_general(chat_id, text, **_):
         if chat_id == config.group_chat_id:
@@ -292,3 +299,30 @@ def test_job_dispatch_failure_notifies_admins_once_then_reports_success(conn, co
         if kw.get("chat_id") != config.group_chat_id
     ]
     assert any(t.startswith("✅ Своє повідомлення") for t in admin_texts)
+
+
+def test_job_dispatch_expires_message_from_past_day_and_notifies_admins(conn, config):
+    """Не було зв'язку, поки день не змінився: у General за минулий день
+    нічого не йде, адміни отримують пояснення."""
+    context = make_context(conn, config)
+    custom_id = _create_scheduled(conn, text="вчорашнє", scheduled_at=_PAST_ISO_UTC)
+
+    asyncio.run(custom.job_dispatch(context))
+
+    assert db.get_custom_message(conn, custom_id)["status"] == "expired"
+    chats = [c.kwargs.get("chat_id") for c in context.bot.send_message.await_args_list]
+    assert config.group_chat_id not in chats
+    assert set(config.admin_user_ids) <= set(chats)
+    notice = context.bot.send_message.await_args_list[0].kwargs["text"]
+    assert "День минув" in notice
+
+    context.bot.send_message.reset_mock()
+    asyncio.run(custom.job_dispatch(context))  # повторно нічого не шле
+    context.bot.send_message.assert_not_called()
+
+
+def test_view_for_expired_message(conn, config):
+    custom_id = _create_scheduled(conn, text="вчорашнє", scheduled_at=_PAST_ISO_UTC)
+    db.set_custom_message_status(conn, custom_id, "expired", _PAST_ISO_UTC)
+    body, _ = custom.message_view(conn, db.get_custom_message(conn, custom_id), config.timezone)
+    assert body.startswith("⌛ Не опубліковано")

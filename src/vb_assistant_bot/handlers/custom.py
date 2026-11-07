@@ -61,6 +61,12 @@ def _view(conn, row, timezone: str) -> tuple[str, InlineKeyboardMarkup]:
         return body, _keyboard(row["id"])
     if row["status"] == "cancelled":
         return f"📝 Скасовано (мало піти о {when}){who}:\n\n{row['text']}", _EMPTY_KEYBOARD
+    if row["status"] == "expired":
+        return (
+            f"⌛ Не опубліковано (мало піти о {when}){who}: не було зв'язку, "
+            f"а за минулий день бот у General не публікує.\n\n{row['text']}",
+            _EMPTY_KEYBOARD,
+        )
     if row["status"] == "deleted":
         return f"🗑 Видалено з General (було опубліковано о {when}){who}:\n\n{row['text']}", (
             _EMPTY_KEYBOARD
@@ -328,9 +334,26 @@ async def job_dispatch(context: ContextTypes.DEFAULT_TYPE) -> None:
     conn = context.bot_data["conn"]
     config: Config = context.bot_data["config"]
     now_iso = datetime.now(UTC).isoformat()
+    tz = ZoneInfo(config.timezone)
+    today = datetime.now(tz).date()
     for row in db.due_custom_messages(conn, now_iso):
         when = _when(row, config.timezone)
         author = admin_label(conn, row["created_by"])
+        if datetime.fromisoformat(row["scheduled_at"]).astimezone(tz).date() < today:
+            # Не було зв'язку, поки день не змінився — за минулий день у
+            # General не публікуємо, лише інформуємо адмінів.
+            db.set_custom_message_status(conn, row["id"], "expired", now_iso)
+            audit.log(conn, None, f"своє повідомлення не опубліковано — застаріло (автор {author})")
+            logger.warning("Своє повідомлення id=%s застаріло — не публікую", row["id"])
+            await _notify_admins(
+                context,
+                config,
+                f"⌛ Своє повідомлення (заплановане на {when}, автор {author}) так і не "
+                "вдалося опублікувати в General — не було зв'язку. День минув, тож у "
+                "чат його не надсилаю. Якщо ще актуально — заплануйте заново.",
+            )
+            await _broadcast(context, row["id"])
+            continue
         try:
             sent = await context.bot.send_message(chat_id=config.group_chat_id, text=row["text"])
         except TelegramError as exc:

@@ -154,6 +154,15 @@ def _skipped_body(conn, preview) -> str:
     )
 
 
+def _expired_body(conn, preview) -> str:
+    day = date.fromisoformat(preview["morning_date"]).strftime("%d.%m")
+    return (
+        f"{preview['stats_intro']}\n\n⌛ Не опубліковано: не вдалося надіслати в General "
+        f"{day} (немає зв'язку), а за минулий день бот не публікує.\n"
+        f"{preview['message_text']}"
+    )
+
+
 def _published_body(conn, preview) -> str:
     who = _by(conn, preview["resolved_by"]) or " (автопублікація)"
     body = f"{preview['stats_intro']}\n\n✅ Опубліковано в General{who}:\n{preview['message_text']}"
@@ -207,6 +216,8 @@ def _view_for(conn, preview, morning_key: str, timezone: str) -> tuple[str, Inli
         return _published_body(conn, preview), keyboard
     if status == "deleted":
         return _deleted_body(conn, preview), _EMPTY_KEYBOARD
+    if status == "expired":
+        return _expired_body(conn, preview), _EMPTY_KEYBOARD
     return preview["message_text"], _EMPTY_KEYBOARD
 
 
@@ -541,8 +552,13 @@ async def job_publish_queued(context: ContextTypes.DEFAULT_TYPE) -> None:
     статусом 'queued', чий `scheduled_at` (обраний адміном час — зараз /
     фіксований / довільний) уже настав."""
     conn = context.bot_data["conn"]
+    config: Config = context.bot_data["config"]
     now_iso = datetime.now(UTC).isoformat()
+    today = datetime.now(ZoneInfo(config.timezone)).date().isoformat()
     for preview in db.due_queued_previews(conn, now_iso):
+        if preview["morning_date"] < today:
+            await _expire_preview(context, conn, config, preview)
+            continue
         await _publish_and_resolve(
             context,
             conn,
@@ -553,6 +569,29 @@ async def job_publish_queued(context: ContextTypes.DEFAULT_TYPE) -> None:
             sent_by=preview["resolved_by"],
             retry_job=job_publish_queued,
         )
+
+
+async def _expire_preview(context: ContextTypes.DEFAULT_TYPE, conn, config: Config, preview):
+    """Ранкове повідомлення за минулий день у General не публікується:
+    якщо зв'язку не було (сервер без світла/інтернету, усі спроби
+    `_publish` впали) і день уже змінився, вчорашнє "доброго ранку"
+    в чаті тільки заплутає. Натомість — статус 'expired' і одне
+    повідомлення адмінам (дійде, щойно зв'язок повернеться)."""
+    morning_key = preview["morning_date"]
+    db.resolve_preview(
+        conn, morning_key, "expired", preview["resolved_by"], datetime.now(UTC).isoformat()
+    )
+    audit.log(conn, None, f"ранкове повідомлення за {morning_key} не опубліковано (застаріло)")
+    logger.warning("Ранкове повідомлення за %s застаріло — не публікую", morning_key)
+    day = date.fromisoformat(morning_key).strftime("%d.%m")
+    await _notify_admins(
+        context,
+        config,
+        f"⌛ Ранкове повідомлення за {day} так і не вдалося опублікувати в General "
+        "(не було зв'язку). День минув — у чат його не надсилаю. "
+        "Якщо щось треба донести — створіть нове повідомлення.",
+    )
+    await _broadcast_current_view(context, conn, morning_key)
 
 
 _PUBLISH_RETRY_DELAYS = (3, 8)  # секунди між спробами всередині одного виклику

@@ -514,6 +514,41 @@ def test_job_publish_queued_publishes_when_scheduled_time_reached(conn, config, 
     assert row["sent_by"] == 111
 
 
+def test_job_publish_queued_expires_preview_from_past_day(conn, config, texts, thresholds):
+    """Сервер був без зв'язку, ранкове повідомлення не пішло, а день уже
+    змінився — вчорашнє у General не публікується, адмінам пояснення."""
+    context = make_context(conn, config, texts=texts, thresholds=thresholds)
+    yesterday = (date.today() - timedelta(days=1)).isoformat()
+    db.upsert_preview(
+        conn,
+        morning_date=yesterday,
+        status="pending",
+        day_type="workday",
+        variant_set="heavy",
+        variant_id="v1",
+        message_text="Доброго ранку після важкої ночі",
+        stats_json="{}",
+        stats_intro="📊 Статистика ночі: тривог не зафіксовано.",
+        triggered=True,
+        created_at=_PAST_ISO_UTC,
+    )
+    db.resolve_preview(conn, yesterday, "queued", 111, _PAST_ISO_UTC, scheduled_at=_PAST_ISO_UTC)
+    context.bot.send_message.reset_mock()
+
+    asyncio.run(scheduler.job_publish_queued(context))
+
+    chats = [c.kwargs.get("chat_id") for c in context.bot.send_message.await_args_list]
+    assert config.group_chat_id not in chats
+    assert set(config.admin_user_ids) <= set(chats)
+    preview = db.get_preview(conn, yesterday)
+    assert preview["status"] == "expired"
+    assert conn.execute("SELECT COUNT(*) AS c FROM send_log").fetchone()["c"] == 0
+
+    context.bot.send_message.reset_mock()
+    asyncio.run(scheduler.job_publish_queued(context))
+    context.bot.send_message.assert_not_called()
+
+
 def test_job_publish_queued_skips_not_yet_due(conn, config, texts, thresholds):
     context = make_context(conn, config, texts=texts, thresholds=thresholds)
     asyncio.run(scheduler.generate_and_send_preview(context, force=True))
