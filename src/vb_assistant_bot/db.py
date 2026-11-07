@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS custom_messages (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     text              TEXT NOT NULL,
     scheduled_at      TEXT NOT NULL,   -- канонічний UTC ISO8601
-    status            TEXT NOT NULL,   -- scheduled/cancelled/sent
+    status            TEXT NOT NULL,   -- scheduled/cancelled/sent/deleted/expired
     created_by        INTEGER NOT NULL,
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL,
