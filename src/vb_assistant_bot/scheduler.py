@@ -335,9 +335,12 @@ async def poll_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
         await alerts_health.on_poll_failure(context, exc)
         return
 
+    seen_at = datetime.now(UTC).isoformat()
+    seen_ids: set[str] = set()
     for record in records:
         if not record.external_id:
             continue
+        seen_ids.add(record.external_id)
         db.upsert_alert(
             conn,
             external_id=record.external_id,
@@ -348,7 +351,17 @@ async def poll_alerts(context: ContextTypes.DEFAULT_TYPE) -> None:
             started_at=to_canonical_utc_iso(record.started_at),
             finished_at=to_canonical_utc_iso(record.finished_at) if record.finished_at else None,
             updated_at=to_canonical_utc_iso(record.updated_at),
+            seen_at=seen_at,
         )
+    # Порожня відповідь — підозріла (місяць без жодної тривоги нереальний):
+    # не закриваємо нічого, щоб збій API не "завершив" справжні тривоги.
+    if seen_ids:
+        closed = db.close_vanished_ongoing_alerts(conn, seen_ids)
+        if closed:
+            logger.warning(
+                "Закрито тривоги, що зникли з alerts.in.ua без finished_at: %s",
+                ", ".join(closed),
+            )
     await alerts_health.on_poll_success(context)
 
 

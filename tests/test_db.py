@@ -285,3 +285,66 @@ def test_send_log_insert(conn):
     row = conn.execute("SELECT * FROM send_log").fetchone()
     assert row["mode"] == "manual"
     assert row["sent_by"] == 111
+
+
+def _ongoing(conn, ext_id, start, seen_at=None):
+    db.upsert_alert(
+        conn,
+        external_id=ext_id,
+        location_uid="31",
+        raw_alert_type="air_raid",
+        alert_level="red",
+        threat_types=[],
+        started_at=start,
+        finished_at=None,
+        updated_at=start,
+        seen_at=seen_at,
+    )
+
+
+def test_close_vanished_ongoing_alerts_closes_at_last_seen(conn):
+    """Інцидент 2026-11-01/02: тривога зникла з API без finished_at.
+    Закриваємо на момент, коли API її показував востаннє, — не на момент
+    відновлення зв'язку (простій сервера не має роздувати тривалість)."""
+    _ongoing(conn, "gone", "2026-11-01T20:47:00+00:00", seen_at="2026-11-01T22:00:00+00:00")
+    _ongoing(conn, "alive", "2026-11-01T21:00:00+00:00", seen_at="2026-11-01T22:00:00+00:00")
+
+    closed = db.close_vanished_ongoing_alerts(conn, {"alive"})
+
+    assert closed == ["gone"]
+    rows = {r["external_id"]: r for r in conn.execute("SELECT * FROM alerts")}
+    assert rows["gone"]["finished_at"] == "2026-11-01T22:00:00+00:00"
+    assert rows["alive"]["finished_at"] is None
+
+
+def test_close_vanished_falls_back_to_updated_at_for_legacy_rows(conn):
+    # Записи до міграції не мають last_seen_at.
+    _ongoing(conn, "legacy", "2026-11-01T20:47:03+00:00")
+    db.close_vanished_ongoing_alerts(conn, {"other"})
+    row = conn.execute("SELECT finished_at FROM alerts WHERE external_id='legacy'").fetchone()
+    assert row["finished_at"] == "2026-11-01T20:47:03+00:00"
+
+
+def test_upsert_without_seen_at_keeps_previous_last_seen(conn):
+    _ongoing(conn, "e1", "2026-11-01T20:00:00+00:00", seen_at="2026-11-01T21:00:00+00:00")
+    _ongoing(conn, "e1", "2026-11-01T20:00:00+00:00")
+    row = conn.execute("SELECT last_seen_at FROM alerts WHERE external_id='e1'").fetchone()
+    assert row["last_seen_at"] == "2026-11-01T21:00:00+00:00"
+
+
+def test_init_db_migrates_last_seen_at_column(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute(
+        "CREATE TABLE alerts (id INTEGER PRIMARY KEY, external_id TEXT UNIQUE, "
+        "location_uid TEXT, raw_alert_type TEXT, started_at TEXT, finished_at TEXT, "
+        "updated_at TEXT)"
+    )
+    old.commit()
+    old.close()
+    conn = db.init_db(str(path))
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(alerts)")}
+    assert "last_seen_at" in cols
+    conn.close()

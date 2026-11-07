@@ -64,6 +64,66 @@ def test_poll_alerts_logs_and_returns_on_fetch_error(conn, config):
     assert conn.execute("SELECT COUNT(*) AS c FROM alerts").fetchone()["c"] == 0
 
 
+def _record(ext_id, finished_at=None):
+    return MagicMock(
+        external_id=ext_id,
+        location_uid="31",
+        raw_alert_type="air_raid",
+        alert_level="red",
+        threat_types=[],
+        started_at="2026-11-01T20:47:00+00:00",
+        finished_at=finished_at,
+        updated_at="2026-11-01T20:47:00+00:00",
+    )
+
+
+def _poll_with(conn, config, result):
+    context = make_context(conn, config)
+    client = MagicMock()
+    if isinstance(result, Exception):
+        client.fetch_region_history = MagicMock(side_effect=result)
+    else:
+        client.fetch_region_history = MagicMock(return_value=result)
+    context.bot_data["alerts_client"] = client
+    asyncio.run(scheduler.poll_alerts(context))
+
+
+def _finished(conn, ext_id):
+    return conn.execute(
+        "SELECT finished_at FROM alerts WHERE external_id = ?", (ext_id,)
+    ).fetchone()["finished_at"]
+
+
+def test_poll_alerts_closes_alert_that_vanished_from_api(conn, config):
+    """Інцидент 2026-11-01/02: API прибрав активні тривоги з month_ago.json
+    без finished_at — у БД вони лишались "активними" назавжди."""
+    _poll_with(conn, config, [_record("gone"), _record("other")])
+    assert _finished(conn, "gone") is None
+
+    _poll_with(conn, config, [_record("other")])
+
+    assert _finished(conn, "gone") is not None
+    assert _finished(conn, "other") is None
+
+
+def test_poll_alerts_outage_does_not_close_ongoing_alerts(conn, config):
+    """Сервер без світла/інтернету: опитування падає — нічого не
+    закривається. Після відновлення тривога, що скінчилась за час
+    простою, отримує справжній finished_at з API."""
+    _poll_with(conn, config, [_record("e1")])
+    _poll_with(conn, config, OSError("Network is unreachable"))
+    assert _finished(conn, "e1") is None
+
+    _poll_with(conn, config, [_record("e1", finished_at="2026-11-02T03:00:00+00:00")])
+    assert _finished(conn, "e1") == "2026-11-02T03:00:00+00:00"
+
+
+def test_poll_alerts_empty_response_does_not_close_anything(conn, config):
+    _poll_with(conn, config, [_record("e1")])
+    _poll_with(conn, config, [])
+    assert _finished(conn, "e1") is None
+
+
 def test_generate_and_send_preview_force_sends_to_all_admins(conn, config, texts, thresholds):
     context = make_context(conn, config, texts=texts, thresholds=thresholds)
 
